@@ -2,9 +2,9 @@
 
 Utilitário portátil para Windows destinado à **manutenção, correção, recuperação e restauração de bancos Firebird 1.0 a 5.0**.
 
-**Versão atual:** 1.2.11
+**Versão atual:** 1.2.12
 
-A v1.2.11 corrige o empacotamento automático no GitHub Actions: o `go build` passa a receber `-ldflags` de forma compatível com PowerShell, evitando a falha que interrompia a Release antes da geração dos EXEs. O hardening de distribuição, VersionInfo, manifesto e assinatura Authenticode opcional continuam preservados.
+A v1.2.12 endurece a distribuição contra falsos positivos e builds sem identidade: remove autoelevação automática, deixa de extrair ícones para `%TEMP%`, exige Microsoft Artifact Signing + timestamp em toda Release oficial e adiciona atestação de proveniência. Releases sem assinatura são bloqueadas.
 
 **Projeto feito por Marcos De Mori Laiola**
 
@@ -31,12 +31,15 @@ A v1.2.11 corrige o empacotamento automático no GitHub Actions: o `go build` pa
 
 Os executáveis compilados devem ser disponibilizados na seção **Releases** deste repositório.
 
-Ao criar uma tag no formato `v1.2.11`, por exemplo, o workflow de release compila automaticamente:
+Ao criar uma tag no formato `v1.2.12`, por exemplo, o workflow de release compila automaticamente:
 
 - Windows x64;
 - Windows x86 / 32-bit;
 - arquivo SHA-256;
-- status explícito da assinatura Authenticode.
+- assinatura Authenticode obrigatória via Microsoft Artifact Signing;
+- timestamp RFC3161;
+- atestação de proveniência do GitHub;
+- arquivo SHA-256 calculado após a assinatura.
 
 Os binários são anexados diretamente à GitHub Release e não ficam armazenados no histórico Git.
 
@@ -65,23 +68,23 @@ Restaura um backup Firebird para o destino selecionado sem executar a etapa de c
 - acesso à internet na primeira execução para instalar `go-winres v0.3.3`;
 - Git, opcional para desenvolvimento.
 
-Execute:
+Para teste local sem assinatura, é necessário assumir explicitamente que o binário é apenas de desenvolvimento:
 
 ```powershell
-.\tools\build.ps1
+.\tools\build.ps1 -Version "1.2.12" -AllowUnsignedDev
 ```
 
-Os arquivos serão gerados em `dist/`.
+O arquivo recebe `_UNSIGNED_DEV` no nome. Para distribuição pública use a Release oficial assinada.
 
 Para compilar somente x64:
 
 ```powershell
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"
-.\tools\prepare-resources.ps1 -Version "1.2.11"
+.\tools\prepare-resources.ps1 -Version "1.2.12"
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"
-go build -trimpath -buildvcs=false -ldflags="-H=windowsgui -X main.appVersion=1.2.11" -o FirebirdToolbox.exe .
+go build -trimpath -buildvcs=false -ldflags="-H=windowsgui -X main.appVersion=1.2.12" -o FirebirdToolbox.exe .
 ```
 
 ## Publicar no GitHub
@@ -93,7 +96,7 @@ Consulte [GITHUB_UPLOAD.md](GITHUB_UPLOAD.md) ou execute `PUBLICAR_GITHUB.bat` p
 O projeto possui dois workflows:
 
 - **CI:** valida `gofmt`, executa `go vet`, testes e builds x64/x86 em push/PR para `main`;
-- **Release:** em tags `v*.*.*`, gera recursos nativos do Windows, compila x64/x86, assina com Authenticode quando o certificado estiver configurado, calcula SHA-256 após a assinatura e cria a GitHub Release automaticamente.
+- **Release:** em tags `v*.*.*`, exige configuração do Microsoft Artifact Signing, compila x64/x86, assina e aplica timestamp, valida Authenticode, executa preflight do Defender quando disponível, calcula SHA-256, gera atestações e só então cria a GitHub Release.
 
 A CI não envia artifacts intermediários, evitando consumo desnecessário de Actions Storage.
 
@@ -107,7 +110,8 @@ A CI não envia artifacts intermediários, evitando consumo desnecessário de Ac
 ├── scripts/                # BATs originais de referência
 ├── winres/                 # ícone, manifesto e VersionInfo do executável
 ├── tools/build.ps1         # build local x64/x86
-├── tools/sign-windows.ps1  # assinatura Authenticode opcional
+├── tools/sign-windows.ps1  # assinatura PFX apenas para build local
+├── tools/defender-preflight.ps1 # preflight Defender da Release
 ├── PUBLICAR_GITHUB.bat     # publicacao guiada opcional
 ├── main.go                 # aplicação Win32
 ├── main_test.go            # regressões

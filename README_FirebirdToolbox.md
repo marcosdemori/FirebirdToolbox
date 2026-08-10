@@ -1,11 +1,11 @@
-# Firebird Toolbox v1.2.11
+# Firebird Toolbox v1.2.12
 
 > Para a visão geral do repositório, build e publicação no GitHub, consulte [README.md](README.md).
 
 
 Utilitário portátil para Windows (x64 e x86) para manutenção, recuperação e restauração de bancos Firebird **1.0, 1.5, 2.0, 2.1, 2.5, 3.0, 4.0 e 5.0**.
 
-A v1.2.11 mantém somente três rotinas na interface:
+A v1.2.12 mantém somente três rotinas na interface:
 
 1. `Corrigir banco`
 2. `Corrigir banco (avançado)`
@@ -268,18 +268,23 @@ A porta pode ser detectada em `RemoteServicePort` do `firebird.conf`. O serviço
 
 ## Build
 
-```powershell
-$env:GOOS = 'windows'
-$env:GOARCH = 'amd64'
-go vet ./...
-.\tools\prepare-resources.ps1 -Version '1.2.11'
-go build -trimpath -buildvcs=false -ldflags='-H=windowsgui -X main.appVersion=1.2.11' -o FirebirdToolbox_v1.2.11.exe .
+A distribuição oficial é gerada pelo GitHub Actions e exige Microsoft Artifact Signing. Para um build local **somente de desenvolvimento**:
 
-$env:GOARCH = '386'
-go vet ./...
-go build -trimpath -buildvcs=false -ldflags='-H=windowsgui -X main.appVersion=1.2.11' -o FirebirdToolbox_v1.2.11_x86.exe .
+```powershell
+.\tools\build.ps1 -Version '1.2.12' -AllowUnsignedDev
+```
+
+Os arquivos locais sem assinatura recebem `_UNSIGNED_DEV` no nome e não devem ser distribuídos.
+
+Para um build local com PFX confiável:
+
+```powershell
+.\tools\build.ps1 `
+  -Version '1.2.12' `
+  -SigningPfx 'C:\Certificados\codigo.pfx' `
+  -SigningPassword 'SENHA'
 ```
 
 ## Assinatura
 
-O executável não possui certificado comercial de assinatura de código. O Windows/SmartScreen pode mostrar um aviso na primeira execução.
+Desde a v1.2.12, a GitHub Release não possui fallback sem assinatura. O workflow exige Microsoft Artifact Signing via OIDC, timestamp RFC3161 e verificação Authenticode antes de publicar qualquer EXE. Consulte `docs/DISTRIBUICAO_WINDOWS.md`.

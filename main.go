@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"embed"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -28,11 +29,11 @@ import (
 	"unsafe"
 )
 
-var appVersion = "1.2.11"
+var appVersion = "1.2.12"
 var appCredit = "Projeto feito por Marcos De Mori Laiola"
 
 // Os BATs originais continuam incorporados como referencia/documentacao da logica
-// que originou o utilitario. A v1.2.11 executa gfix/gbak diretamente para manter
+// que originou o utilitario. A v1.2.12 executa gfix/gbak diretamente para manter
 // todo o log dentro da interface e permitir combinar versoes de origem/destino.
 //
 //go:embed scripts/*.bat LEIA-ME.md assets/*.ico
@@ -80,9 +81,8 @@ const (
 	EM_SCROLLCARET     = 0x00B7
 	EM_SETPASSWORDCHAR = 0x00CC
 
-	SW_HIDE       = 0
-	SW_SHOW       = 5
-	SW_SHOWNORMAL = 1
+	SW_HIDE = 0
+	SW_SHOW = 5
 
 	MB_OK           = 0x00000000
 	MB_ICONERROR    = 0x00000010
@@ -111,8 +111,6 @@ const (
 	SS_ICON      = 0x00000003
 	STM_SETICON  = 0x0170
 
-	IMAGE_ICON       = 1
-	LR_LOADFROMFILE  = 0x00000010
 	ILC_MASK         = 0x00000001
 	ILC_COLOR32      = 0x00000020
 	BCM_SETIMAGELIST = 0x1602
@@ -378,48 +376,46 @@ var (
 	ole32    = syscall.NewLazyDLL("ole32.dll")
 	comctl32 = syscall.NewLazyDLL("comctl32.dll")
 
-	procRegisterClassExW    = user32.NewProc("RegisterClassExW")
-	procCreateWindowExW     = user32.NewProc("CreateWindowExW")
-	procDefWindowProcW      = user32.NewProc("DefWindowProcW")
-	procShowWindow          = user32.NewProc("ShowWindow")
-	procUpdateWindow        = user32.NewProc("UpdateWindow")
-	procGetMessageW         = user32.NewProc("GetMessageW")
-	procTranslateMessage    = user32.NewProc("TranslateMessage")
-	procDispatchMessageW    = user32.NewProc("DispatchMessageW")
-	procPostQuitMessage     = user32.NewProc("PostQuitMessage")
-	procDestroyWindow       = user32.NewProc("DestroyWindow")
-	procSendMessageW        = user32.NewProc("SendMessageW")
-	procSetWindowTextW      = user32.NewProc("SetWindowTextW")
-	procGetWindowTextW      = user32.NewProc("GetWindowTextW")
-	procGetWindowTextLen    = user32.NewProc("GetWindowTextLengthW")
-	procEnableWindow        = user32.NewProc("EnableWindow")
-	procMessageBoxW         = user32.NewProc("MessageBoxW")
-	procLoadCursorW         = user32.NewProc("LoadCursorW")
-	procLoadImageW          = user32.NewProc("LoadImageW")
-	procDestroyIcon         = user32.NewProc("DestroyIcon")
-	procDrawIconEx          = user32.NewProc("DrawIconEx")
-	procDrawTextW           = user32.NewProc("DrawTextW")
-	procDrawFocusRect       = user32.NewProc("DrawFocusRect")
-	procFillRect            = user32.NewProc("FillRect")
-	procFrameRect           = user32.NewProc("FrameRect")
-	procInvalidateRect      = user32.NewProc("InvalidateRect")
-	procGetWindowLongW      = user32.NewProc("GetWindowLongW")
-	procSetWindowLongW      = user32.NewProc("SetWindowLongW")
-	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
-	procSetTextColor        = gdi32.NewProc("SetTextColor")
-	procSetBkColor          = gdi32.NewProc("SetBkColor")
-	procSetBkMode           = gdi32.NewProc("SetBkMode")
-	procSelectObject        = gdi32.NewProc("SelectObject")
-	procCreateSolidBrush    = gdi32.NewProc("CreateSolidBrush")
-	procCreateFontW         = gdi32.NewProc("CreateFontW")
-	procDeleteObject        = gdi32.NewProc("DeleteObject")
+	procRegisterClassExW         = user32.NewProc("RegisterClassExW")
+	procCreateWindowExW          = user32.NewProc("CreateWindowExW")
+	procDefWindowProcW           = user32.NewProc("DefWindowProcW")
+	procShowWindow               = user32.NewProc("ShowWindow")
+	procUpdateWindow             = user32.NewProc("UpdateWindow")
+	procGetMessageW              = user32.NewProc("GetMessageW")
+	procTranslateMessage         = user32.NewProc("TranslateMessage")
+	procDispatchMessageW         = user32.NewProc("DispatchMessageW")
+	procPostQuitMessage          = user32.NewProc("PostQuitMessage")
+	procDestroyWindow            = user32.NewProc("DestroyWindow")
+	procSendMessageW             = user32.NewProc("SendMessageW")
+	procSetWindowTextW           = user32.NewProc("SetWindowTextW")
+	procGetWindowTextW           = user32.NewProc("GetWindowTextW")
+	procGetWindowTextLen         = user32.NewProc("GetWindowTextLengthW")
+	procEnableWindow             = user32.NewProc("EnableWindow")
+	procMessageBoxW              = user32.NewProc("MessageBoxW")
+	procLoadCursorW              = user32.NewProc("LoadCursorW")
+	procDestroyIcon              = user32.NewProc("DestroyIcon")
+	procCreateIconFromResourceEx = user32.NewProc("CreateIconFromResourceEx")
+	procDrawIconEx               = user32.NewProc("DrawIconEx")
+	procDrawTextW                = user32.NewProc("DrawTextW")
+	procDrawFocusRect            = user32.NewProc("DrawFocusRect")
+	procFillRect                 = user32.NewProc("FillRect")
+	procFrameRect                = user32.NewProc("FrameRect")
+	procInvalidateRect           = user32.NewProc("InvalidateRect")
+	procGetWindowLongW           = user32.NewProc("GetWindowLongW")
+	procSetWindowLongW           = user32.NewProc("SetWindowLongW")
+	procSetForegroundWindow      = user32.NewProc("SetForegroundWindow")
+	procSetTextColor             = gdi32.NewProc("SetTextColor")
+	procSetBkColor               = gdi32.NewProc("SetBkColor")
+	procSetBkMode                = gdi32.NewProc("SetBkMode")
+	procSelectObject             = gdi32.NewProc("SelectObject")
+	procCreateSolidBrush         = gdi32.NewProc("CreateSolidBrush")
+	procCreateFontW              = gdi32.NewProc("CreateFontW")
+	procDeleteObject             = gdi32.NewProc("DeleteObject")
 
 	procGetModuleHandleW     = kernel32.NewProc("GetModuleHandleW")
 	procGetOEMCP             = kernel32.NewProc("GetOEMCP")
 	procMultiByteToWideChar  = kernel32.NewProc("MultiByteToWideChar")
 	procGetStockObject       = gdi32.NewProc("GetStockObject")
-	procShellExecuteW        = shell32.NewProc("ShellExecuteW")
-	procIsUserAnAdmin        = shell32.NewProc("IsUserAnAdmin")
 	procGetOpenFileNameW     = comdlg32.NewProc("GetOpenFileNameW")
 	procGetSaveFileNameW     = comdlg32.NewProc("GetSaveFileNameW")
 	procSHBrowseForFolderW   = shell32.NewProc("SHBrowseForFolderW")
@@ -472,7 +468,6 @@ var (
 	recoveryTechnicalLogMu sync.Mutex
 	recoveryTechnicalLog   string
 
-	uiAssetDir string
 	imageLists []uintptr
 	liveIcons  []syscall.Handle
 	iconCache  = map[string]syscall.Handle{}
@@ -519,27 +514,71 @@ func messageBox(title, text string, flags uintptr) int {
 	return int(r)
 }
 
-func prepareUIAssets() {
-	dir := filepath.Join(os.TempDir(), "FirebirdToolbox", "ui-v"+appVersion)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return
+func icoImageData(data []byte, requested int32) ([]byte, bool) {
+	if len(data) < 6 || binary.LittleEndian.Uint16(data[0:2]) != 0 || binary.LittleEndian.Uint16(data[2:4]) != 1 {
+		return nil, false
 	}
-	for _, name := range []string{"flame", "gear", "folder", "database", "restore", "play", "stop", "help", "details", "clear", "copy", "eye", "terminal"} {
-		data, err := embeddedFiles.ReadFile("assets/" + name + ".ico")
-		if err != nil {
-			continue
+	count := int(binary.LittleEndian.Uint16(data[4:6]))
+	if count <= 0 || len(data) < 6+count*16 {
+		return nil, false
+	}
+
+	bestIndex := -1
+	bestScore := int64(1 << 62)
+	for i := 0; i < count; i++ {
+		entry := 6 + i*16
+		width := int32(data[entry])
+		height := int32(data[entry+1])
+		if width == 0 {
+			width = 256
 		}
-		_ = os.WriteFile(filepath.Join(dir, name+".ico"), data, 0600)
+		if height == 0 {
+			height = 256
+		}
+		score := int64(abs32(width-requested) + abs32(height-requested))
+		if score < bestScore {
+			bestScore = score
+			bestIndex = i
+		}
 	}
-	uiAssetDir = dir
+	if bestIndex < 0 {
+		return nil, false
+	}
+
+	entry := 6 + bestIndex*16
+	size := int(binary.LittleEndian.Uint32(data[entry+8 : entry+12]))
+	offset := int(binary.LittleEndian.Uint32(data[entry+12 : entry+16]))
+	if size <= 0 || offset < 0 || offset > len(data) || size > len(data)-offset {
+		return nil, false
+	}
+	return data[offset : offset+size], true
+}
+
+func abs32(v int32) int32 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func loadUIIcon(name string, size int32) syscall.Handle {
-	if uiAssetDir == "" {
+	data, err := embeddedFiles.ReadFile("assets/" + name + ".ico")
+	if err != nil {
 		return 0
 	}
-	path := filepath.Join(uiAssetDir, name+".ico")
-	h, _, _ := procLoadImageW.Call(0, uintptr(unsafe.Pointer(u16(path))), IMAGE_ICON, uintptr(size), uintptr(size), LR_LOADFROMFILE)
+	image, ok := icoImageData(data, size)
+	if !ok || len(image) == 0 {
+		return 0
+	}
+	h, _, _ := procCreateIconFromResourceEx.Call(
+		uintptr(unsafe.Pointer(&image[0])),
+		uintptr(len(image)),
+		1,
+		0x00030000,
+		uintptr(size),
+		uintptr(size),
+		0,
+	)
 	return syscall.Handle(h)
 }
 
@@ -709,7 +748,7 @@ func setAppIcons() {
 	}
 }
 
-func cleanupUIAssets() {
+func cleanupUIResources() {
 	for _, h := range imageLists {
 		if h != 0 {
 			procImageListDestroy.Call(h)
@@ -723,9 +762,6 @@ func cleanupUIAssets() {
 	}
 	liveIcons = nil
 	iconCache = map[string]syscall.Handle{}
-	if uiAssetDir != "" {
-		_ = os.RemoveAll(uiAssetDir)
-	}
 }
 
 func setText(id int, text string) {
@@ -5202,29 +5238,6 @@ func openDestination() {
 	_ = cmd.Start()
 }
 
-func ensureAdmin() {
-	r, _, _ := procIsUserAnAdmin.Call()
-	if r != 0 {
-		return
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return
-	}
-	cwd, _ := os.Getwd()
-	ret, _, _ := procShellExecuteW.Call(
-		0,
-		uintptr(unsafe.Pointer(u16("runas"))),
-		uintptr(unsafe.Pointer(u16(exe))),
-		0,
-		uintptr(unsafe.Pointer(u16(cwd))),
-		SW_SHOWNORMAL,
-	)
-	if ret > 32 {
-		os.Exit(0)
-	}
-}
-
 func wndProc(hwnd syscall.Handle, uMsg uint32, wParam, lParam uintptr) uintptr {
 	switch uMsg {
 	case WM_CREATE:
@@ -5453,8 +5466,6 @@ func main() {
 	procCoInitializeEx.Call(0, 2)
 	procInitCommonControls.Call()
 	defer procCoUninitialize.Call()
-	ensureAdmin()
-
 	hinst, _, _ := procGetModuleHandleW.Call(0)
 	cursor, _, _ := procLoadCursorW.Call(0, IDC_ARROW)
 	guiFont = createFont(-15, FW_NORMAL, "Segoe UI")
@@ -5505,7 +5516,6 @@ func main() {
 		return
 	}
 	mainHwnd = syscall.Handle(hwnd)
-	prepareUIAssets()
 	setAppIcons()
 	buildUI()
 	procShowWindow.Call(hwnd, SW_SHOW)
@@ -5521,7 +5531,7 @@ func main() {
 		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
 	}
 
-	cleanupUIAssets()
+	cleanupUIResources()
 
 	if guiFont != 0 {
 		procDeleteObject.Call(uintptr(guiFont))

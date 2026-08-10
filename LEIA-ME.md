@@ -1,6 +1,6 @@
-# Firebird Toolbox v1.2.11 — Ajuda rápida
+# Firebird Toolbox v1.2.12 — Ajuda rápida
 
-Na v1.2.11, o pipeline de Release corrige a passagem de `-ldflags` ao `go build` no PowerShell, permitindo que os executáveis x64/x86 sejam realmente gerados e publicados. Os metadados nativos do Windows, ícone, manifesto e a assinatura Authenticode opcional continuam preservados.
+Na v1.2.12, a distribuição oficial exige Microsoft Artifact Signing com timestamp e não publica EXE sem assinatura. O aplicativo também deixa de se autoelevar e passa a carregar os ícones incorporados diretamente da memória, sem gravá-los em `%TEMP%`.
 
 
 

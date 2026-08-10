@@ -265,7 +265,7 @@ func TestMergeRecoveryStatsKeepsWorstCounts(t *testing.T) {
 }
 
 func TestProjectCreditAndVersion(t *testing.T) {
-	if appVersion != "1.2.11" {
+	if appVersion != "1.2.12" {
 		t.Fatalf("unexpected app version: %s", appVersion)
 	}
 	if appCredit != "Projeto feito por Marcos De Mori Laiola" {
@@ -598,8 +598,8 @@ func TestWindowsDistributionMetadataConfig(t *testing.T) {
 	for _, want := range []string{
 		`"CompanyName": "Marcos De Mori Laiola"`,
 		`"ProductName": "Firebird Toolbox"`,
-		`"FileVersion": "1.2.11.0"`,
-		`"ProductVersion": "1.2.11"`,
+		`"FileVersion": "1.2.12.0"`,
+		`"ProductVersion": "1.2.12"`,
 		`"execution-level": "as invoker"`,
 		`"use-common-controls-v6": true`,
 	} {
@@ -629,6 +629,76 @@ func TestWindowsBuildScriptsPassLdflagsAsSeparateArgument(t *testing.T) {
 		}
 		if !strings.Contains(text, "$ld") {
 			t.Fatalf("%s must pass the ldflags value separately", path)
+		}
+	}
+}
+
+func TestEmbeddedIconsStayInMemory(t *testing.T) {
+	data, err := embeddedFiles.ReadFile("assets/flame.ico")
+	if err != nil {
+		t.Fatalf("embedded flame icon missing: %v", err)
+	}
+	image, ok := icoImageData(data, 32)
+	if !ok || len(image) == 0 {
+		t.Fatal("embedded icon could not be parsed for in-memory loading")
+	}
+
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	for _, forbidden := range []string{"prepareUIAssets", "LR_LOADFROMFILE", `os.TempDir(), "FirebirdToolbox"`, `u16("runas")`, "IsUserAnAdmin"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("distribution hardening regression: main.go still contains %q", forbidden)
+		}
+	}
+	for _, required := range []string{"CreateIconFromResourceEx", "icoImageData", "execution-level"} {
+		if required == "execution-level" {
+			continue
+		}
+		if !strings.Contains(text, required) {
+			t.Fatalf("distribution hardening missing %q", required)
+		}
+	}
+}
+
+func TestReleaseRequiresMicrosoftArtifactSigning(t *testing.T) {
+	data, err := os.ReadFile(".github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"id-token: write",
+		"attestations: write",
+		"azure/login@v3",
+		"azure/artifact-signing-action@v2",
+		"timestamp.acs.microsoft.com",
+		"actions/attest@v4",
+		"Release bloqueada: configure Artifact Signing antes de publicar",
+		"-RequireSignature -RequireTimestamp",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("release workflow missing mandatory signing control %q", want)
+		}
+	}
+	for _, forbidden := range []string{"WINDOWS_SIGN_CERT_BASE64", "WINDOWS_SIGN_CERT_PASSWORD", "UNSIGNED -", "Release sera publicada sem assinatura"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("release workflow must not permit unsigned publication: found %q", forbidden)
+		}
+	}
+}
+
+func TestLocalBuildMarksUnsignedArtifactsAsDevelopmentOnly(t *testing.T) {
+	data, err := os.ReadFile("tools/build.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{"[switch]$AllowUnsignedDev", "Build de distribuicao bloqueado sem assinatura", "_UNSIGNED_DEV", "NAO DISTRIBUIR"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("local build hardening missing %q", want)
 		}
 	}
 }

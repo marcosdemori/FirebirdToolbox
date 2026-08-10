@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory=$true)][string]$Path,
-    [string]$Version = "1.2.11",
-    [switch]$RequireSignature
+    [string]$Version = "1.2.12",
+    [switch]$RequireSignature,
+    [switch]$RequireTimestamp
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,6 +31,18 @@ $sig = Get-AuthenticodeSignature -FilePath $Path
 if ($RequireSignature -and $sig.Status -ne 'Valid') {
     throw "Assinatura Authenticode obrigatoria, status atual: $($sig.Status)"
 }
+if ($RequireSignature -and -not $sig.SignerCertificate) {
+    throw "Assinatura Authenticode sem certificado de signatario."
+}
+if ($RequireTimestamp -and -not $sig.TimeStamperCertificate) {
+    throw "Timestamp RFC3161 obrigatorio, mas nao foi encontrado."
+}
 
 Write-Host "VersionInfo OK: $($vi.ProductName) $($vi.ProductVersion) | $($vi.CompanyName)"
 Write-Host "Authenticode: $($sig.Status)"
+if ($sig.SignerCertificate) {
+    Write-Host "Signer: $($sig.SignerCertificate.Subject)"
+}
+if ($sig.TimeStamperCertificate) {
+    Write-Host "Timestamp: $($sig.TimeStamperCertificate.Subject)"
+}

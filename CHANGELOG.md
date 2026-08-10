@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.12 - 2026-08-10
+
+- Remove a autoelevação automática via `runas`; o aplicativo inicia como `asInvoker` e segue privilégio mínimo.
+- Remove a extração dos ícones incorporados para `%TEMP%`; os arquivos ICO passam a ser interpretados em memória e convertidos em `HICON` com `CreateIconFromResourceEx`.
+- GitHub Release passa a exigir Microsoft Artifact Signing via OIDC (`azure/login@v3` + `azure/artifact-signing-action@v2`); não existe mais fallback de Release sem assinatura.
+- Exige timestamp RFC3161 e valida `Get-AuthenticodeSignature` antes de empacotar.
+- Adiciona preflight do Microsoft Defender quando os cmdlets Defender estão disponíveis no runner.
+- Gera atestações de proveniência do GitHub para os executáveis x64/x86 e o ZIP de distribuição.
+- Build local sem assinatura passa a exigir `-AllowUnsignedDev`, recebe `_UNSIGNED_DEV` no nome e é marcado explicitamente como não distribuível.
+- Adiciona testes de regressão para impedir retorno de autoelevação, extração de ícones para TEMP e Release oficial sem assinatura.
+- Mantém integralmente a lógica de manutenção e recuperação Firebird da v1.2.11.
+
 ## 1.2.11 - 2026-08-10
 
 - Corrige o build de Release no GitHub Actions: o PowerShell passa `-ldflags` e seu valor como argumentos separados para o `go build`, evitando o erro `invalid value "$ld" for flag -ldflags`.
