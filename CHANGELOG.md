@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.2.14 - 2026-08-10
+
+- Adiciona pós-recuperação obrigatório no modo avançado depois do restore final.
+- Valida acesso SQL, transações em limbo, sweep final e `gfix -validate -full`.
+- Bloqueia liberação quando restarem índices de usuário ou constraints `PRIMARY KEY`/`UNIQUE` inativos.
+- Compara metadados e contagens das relações diretamente envolvidas com o restore de teste.
+- Amplia o `gstat` para registrar OIT/OAT/OST, next transaction e sweep interval.
+- Gera `RELATORIO_SAUDE_PERFORMANCE.txt` e só marca recuperação completa como `APTO PARA PRODUÇÃO` quando todos os gates críticos passam.
+- Recuperações parciais estruturalmente saudáveis continuam exigindo revisão funcional e não recebem liberação automática.
+
+## 1.2.13 - 2026-08-10
+
+- Substitui a decisão cega de duplicidade por uma janela `Resolver conflito de registros` com `REGISTRO 1` e `REGISTRO 2` lado a lado.
+- Destaca com `[DIFERENTE]` os campos escalares que não coincidem e mantém no resumo a lista completa de diferenças detectadas.
+- Em Firebird 4.0/5.0, calcula SHA-256 dos BLOBs/fotos com funções nativas do Firebird e inclui os hashes na comparação; versões antigas continuam marcando BLOBs como inconclusivos em vez de assumir igualdade.
+- Permite escolher explicitamente `Manter registro 1` ou `Manter registro 2`, abrir o arquivo de comparação ou `Preservar e cancelar` sem remover nenhuma ocorrência.
+- Gera `COMPARACAO_CONFLITO_<TABELA>_XX.txt` na pasta de recuperação e registra a ocorrência escolhida no relatório principal e em `CONFLITOS_DUPLICIDADE.txt`.
+- Após a escolha, continua automaticamente o saneamento: remove somente as ocorrências extras na cópia de trabalho, reconstrói índices, valida, gera novo backup e repete o restore de teste.
+- Mantém o banco original e o snapshot de inspeção intactos; uma escolha entre registros diferentes continua classificada como recuperação parcial.
+- Atualiza VersionInfo, scripts de build e documentação para 1.2.13.
+
 ## 1.2.12 - 2026-08-10
 
 - Remove a autoelevação automática via `runas`; o aplicativo inicia como `asInvoker` e segue privilégio mínimo.

@@ -2,6 +2,9 @@
 
 ## Objetivo da v1.2.12
 
+> **v1.2.14:** mantém integralmente a cadeia de distribuição e adiciona gates de saúde pós-recuperação na lógica do aplicativo. O resolvedor visual de conflitos introduzido na v1.2.14 permanece.
+
+
 A v1.2.12 endurece o executável e a cadeia de distribuição em dois níveis:
 
 1. o aplicativo deixa de se autoelevar com `runas` e deixa de extrair ícones para `%TEMP%`; os ícones incorporados são carregados diretamente da memória;
@@ -18,7 +21,7 @@ Em **Propriedades > Detalhes** do EXE oficial:
 - Produto: `Firebird Toolbox`
 - Empresa/desenvolvedor: `Marcos De Mori Laiola`
 - Descrição: `Firebird Toolbox - manutenção e recuperação Firebird`
-- Versão: `1.2.12`
+- Versão atual: `1.2.14`
 - Copyright: `© 2026 Marcos De Mori Laiola. Todos os direitos reservados.`
 
 Os recursos são definidos em `winres/winres.json` e gerados por `go-winres v0.3.3`.
@@ -82,7 +85,7 @@ O endpoint deve corresponder à região da conta do Artifact Signing.
 Build local sem assinatura é permitido apenas de forma explícita para desenvolvimento:
 
 ```powershell
-.\tools\build.ps1 -Version "1.2.12" -AllowUnsignedDev
+.\tools\build.ps1 -Version "1.2.14" -AllowUnsignedDev
 ```
 
 Os arquivos recebem `_UNSIGNED_DEV` no nome e `SIGNATURE_STATUS.txt` informa **NAO DISTRIBUIR**.
@@ -91,7 +94,7 @@ Para um build local assinado com um certificado PFX confiável:
 
 ```powershell
 .\tools\build.ps1 `
-  -Version "1.2.12" `
+  -Version "1.2.14" `
   -SigningPfx "C:\Certificados\codigo.pfx" `
   -SigningPassword "SENHA_DO_CERTIFICADO"
 ```
@@ -115,7 +118,7 @@ Os `.ico` continuam incorporados ao executável, mas não são mais gravados em 
 No PowerShell:
 
 ```powershell
-Get-AuthenticodeSignature ".\FirebirdToolbox_v1.2.12.exe" |
+Get-AuthenticodeSignature ".\FirebirdToolbox_v1.2.14.exe" |
   Format-List Status,StatusMessage,SignerCertificate,TimeStamperCertificate
 ```
 
@@ -124,13 +127,13 @@ A Release oficial deve mostrar `Status : Valid` e um certificado de timestamp.
 Confira também o SHA-256 publicado:
 
 ```powershell
-Get-FileHash ".\FirebirdToolbox_v1.2.12.exe" -Algorithm SHA256
+Get-FileHash ".\FirebirdToolbox_v1.2.14.exe" -Algorithm SHA256
 ```
 
 E, para repositório público, a proveniência do GitHub pode ser verificada com:
 
 ```powershell
-gh attestation verify .\FirebirdToolbox_v1.2.12.exe -R marcosdemori/FirebirdToolbox
+gh attestation verify .\FirebirdToolbox_v1.2.14.exe -R marcosdemori/FirebirdToolbox
 ```
 
 ## Quando o Defender ainda detectar um build oficial assinado

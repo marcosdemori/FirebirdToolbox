@@ -48,7 +48,7 @@ git diff --cached --quiet
 if not errorlevel 1 (
     echo Nao ha alteracoes novas para commit.
 ) else (
-    git commit -m "fix(security): exigir release assinada e reduzir heuristicas v1.2.12" || goto :erro
+    git commit -m "feat(recovery): adicionar gates de saude pos-recuperacao v1.2.14" || goto :erro
 )
 
 echo.
@@ -72,16 +72,16 @@ git push -u origin main || goto :erro
 
 echo.
 echo.
-echo ATENCAO: a v1.2.12 NAO publica sem Microsoft Artifact Signing.
+echo ATENCAO: a v1.2.14 NAO publica sem Microsoft Artifact Signing.
 echo Configure os Secrets/Variables descritos em docs\DISTRIBUICAO_WINDOWS.md antes de criar a tag.
 echo.
-set /p TAG=Criar e enviar a tag v1.2.12 para gerar a Release automatica? [S/N]:
+set /p TAG=Criar e enviar a tag v1.2.14 para gerar a Release automatica? [S/N]:
 if /I "%TAG%"=="S" (
-    git rev-parse v1.2.12 >nul 2>nul
+    git rev-parse v1.2.14 >nul 2>nul
     if errorlevel 1 (
-        git tag -a v1.2.12 -m "Firebird Toolbox v1.2.12" || goto :erro
+        git tag -a v1.2.14 -m "Firebird Toolbox v1.2.14" || goto :erro
     )
-    git push origin v1.2.12 || goto :erro
+    git push origin v1.2.14 || goto :erro
     echo.
     echo Tag enviada. O GitHub Actions deve iniciar o workflow Release.
 )

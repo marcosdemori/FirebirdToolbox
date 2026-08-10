@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -265,7 +266,7 @@ func TestMergeRecoveryStatsKeepsWorstCounts(t *testing.T) {
 }
 
 func TestProjectCreditAndVersion(t *testing.T) {
-	if appVersion != "1.2.12" {
+	if appVersion != "1.2.14" {
 		t.Fatalf("unexpected app version: %s", appVersion)
 	}
 	if appCredit != "Projeto feito por Marcos De Mori Laiola" {
@@ -308,6 +309,7 @@ func TestTerminalProgressHelperIsUsedForAllFinalStates(t *testing.T) {
 		`setTerminalProgress(PBST_PAUSED, "Aguardando decisão manual")`,
 		`setTerminalProgress(PBST_PAUSED, "Recuperação parcial disponível")`,
 		`setTerminalProgress(PBST_ERROR, "Encerrado com erro")`,
+		`setTerminalProgress(PBST_ERROR, "Não apto para produção")`,
 		`setTerminalProgress(PBST_PAUSED, "Recuperação parcial concluída")`,
 		`setTerminalProgress(PBST_NORMAL, "Concluído com sucesso")`,
 	} {
@@ -554,10 +556,51 @@ func TestDuplicateCleanupScriptKeepsOnePhysicalOccurrence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("duplicateCleanupScript failed: %v", err)
 	}
-	for _, want := range []string{`RDB$DB_KEY`, `PLAN (T NATURAL)`, `IF (N > 1)`, `DELETE FROM "DOCIT"`} {
+	for _, want := range []string{`RDB$DB_KEY`, `PLAN (T NATURAL)`, `IF (N = 1)`, `K <> KEEP_K`, `DELETE FROM "DOCIT"`} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("cleanup script missing %q:\n%s", want, script)
 		}
+	}
+}
+
+func TestDuplicateCleanupCanKeepSecondOccurrence(t *testing.T) {
+	conflict := restoreDuplicateConflict{
+		Relation: "DOCIT",
+		KeyParts: []duplicateKeyPart{{Column: "COD_DOC", RawValue: "31432"}, {Column: "COD_DOCIT", RawValue: "72"}},
+	}
+	script, err := duplicateCleanupKeepOccurrenceScript(conflict, 2)
+	if err != nil {
+		t.Fatalf("duplicateCleanupKeepOccurrenceScript failed: %v", err)
+	}
+	if !strings.Contains(script, `IF (N = 2) THEN KEEP_K = K`) {
+		t.Fatalf("cleanup script does not preserve second physical record:\n%s", script)
+	}
+}
+
+func TestDuplicateDetailUsesSHA256ForBlobsOnFirebird5(t *testing.T) {
+	meta := relationMetadata{Name: "DOCIT", Columns: []relationColumn{{Name: "DTINS_DOCIT", FieldType: 35}, {Name: "FOTO_DOCIT", FieldType: 261}}}
+	conflict := restoreDuplicateConflict{Relation: "DOCIT", KeyParts: []duplicateKeyPart{{Column: "COD_DOC", RawValue: "31432"}}}
+	script, err := duplicateOccurrenceDetailScript(meta, conflict, 1, meta.Columns[:1], "5.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"CRYPT_HASH", "SHA256", "HEX_ENCODE", "FTB_BLOB|FOTO_DOCIT|", "PLAN (T NATURAL)"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("detail script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+func TestDuplicateOccurrenceFormattingHighlightsDifferences(t *testing.T) {
+	details := duplicateOccurrenceDetails{Ordinal: 1, Values: map[string]string{"COD_DOC": "31432", "DTINS_DOCIT": "2026-08-07 16:44:27"}}
+	cols := []relationColumn{{Name: "COD_DOC", FieldType: 8}, {Name: "DTINS_DOCIT", FieldType: 35}}
+	conflict := restoreDuplicateConflict{DifferingColumns: []string{"DTINS_DOCIT"}}
+	text := formatDuplicateOccurrence(details, cols, conflict)
+	if !strings.Contains(text, "[DIFERENTE] DTINS_DOCIT") {
+		t.Fatalf("difference marker missing:\n%s", text)
+	}
+	if strings.Contains(text, "[DIFERENTE] COD_DOC") {
+		t.Fatalf("unchanged key was incorrectly highlighted:\n%s", text)
 	}
 }
 
@@ -582,7 +625,7 @@ func TestRestoreInactiveArgs(t *testing.T) {
 
 func TestHelpTextCoversDuplicateKeyRecovery(t *testing.T) {
 	text := helpText()
-	for _, want := range []string{"PRIMARY KEY", "UNIQUE", "-inactive", "CONFLITOS_DUPLICIDADE.txt", "primeira ocorrência"} {
+	for _, want := range []string{"PRIMARY KEY", "UNIQUE", "-inactive", "CONFLITOS_DUPLICIDADE.txt", "primeira ocorrência", "REGISTRO 1", "REGISTRO 2", "SHA-256"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("help text missing duplicate-recovery concept %q", want)
 		}
@@ -598,8 +641,8 @@ func TestWindowsDistributionMetadataConfig(t *testing.T) {
 	for _, want := range []string{
 		`"CompanyName": "Marcos De Mori Laiola"`,
 		`"ProductName": "Firebird Toolbox"`,
-		`"FileVersion": "1.2.12.0"`,
-		`"ProductVersion": "1.2.12"`,
+		`"FileVersion": "1.2.14.0"`,
+		`"ProductVersion": "1.2.14"`,
 		`"execution-level": "as invoker"`,
 		`"use-common-controls-v6": true`,
 	} {
@@ -699,6 +742,108 @@ func TestLocalBuildMarksUnsignedArtifactsAsDevelopmentOnly(t *testing.T) {
 	for _, want := range []string{"[switch]$AllowUnsignedDev", "Build de distribuicao bloqueado sem assinatura", "_UNSIGNED_DEV", "NAO DISTRIBUIR"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("local build hardening missing %q", want)
+		}
+	}
+}
+
+func TestParseDatabaseHeaderIncludesTransactionIndicators(t *testing.T) {
+	out := `Database header page information:
+ODS version 13.1
+Page size 4096
+Oldest transaction 100
+Oldest active 101
+Oldest snapshot 102
+Next transaction 120
+Database dialect 1
+Sweep interval 20000`
+	h := parseDatabaseHeader(out)
+	if h.ODS != "13.1" || h.Dialect != "1" || h.PageSize != "4096" {
+		t.Fatalf("unexpected basic header: %#v", h)
+	}
+	if h.OldestTransaction != "100" || h.OldestActive != "101" || h.OldestSnapshot != "102" || h.NextTransaction != "120" || h.SweepInterval != "20000" {
+		t.Fatalf("transaction indicators missing: %#v", h)
+	}
+	if gap, ok := headerTransactionGap(h); !ok || gap != 20 {
+		t.Fatalf("unexpected transaction gap: %d ok=%v", gap, ok)
+	}
+}
+
+func TestHealthMetadataScriptCoversCriticalIndexesAndConstraints(t *testing.T) {
+	script := healthMetadataScript()
+	for _, want := range []string{
+		"FTB_HEALTH_PING|OK",
+		"FTB_HEALTH_TABLES|",
+		"FTB_HEALTH_INDEXES|",
+		"FTB_HEALTH_CONSTRAINTS|",
+		"FTB_HEALTH_INACTIVE_INDEX|",
+		"FTB_HEALTH_INACTIVE_CONSTRAINT|",
+		"PRIMARY KEY",
+		"UNIQUE",
+		"RDB$INDEX_INACTIVE",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("health metadata script missing %q", want)
+		}
+	}
+	if strings.Contains(strings.ToUpper(script), "COALESCE(") {
+		t.Fatal("health metadata gate must remain compatible with Firebird 1.0 and avoid COALESCE")
+	}
+}
+
+func TestHealthReportMarksProductionReadiness(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "RELATORIO_SAUDE_PERFORMANCE.txt")
+	h := postRecoveryHealth{
+		Checked:            true,
+		DatabasePath:       `C:\\Redsis\\DBCOM50.RED`,
+		Version:            "5.0",
+		ConnectivityOK:     true,
+		SweepOK:            true,
+		ValidationOK:       true,
+		Validation:         recoveryStats{},
+		UserTableCount:     42,
+		UserIndexCount:     100,
+		PrimaryUniqueCount: 20,
+		Readiness:          "APTO PARA PRODUÇÃO",
+	}
+	if err := writeHealthReport(path, h, false, true); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{"RELATÓRIO DE SAÚDE", "APTO PARA PRODUÇÃO", "Sweep final concluído: true", "Índices inativos: 0"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("health report missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestAdvancedRecoveryRunsPostRecoveryHealthGate(t *testing.T) {
+	data, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"runPostRecoveryHealth(ctx, c, healthDB, healthReference, healthReportPath, &report)",
+		"RELATORIO_SAUDE_PERFORMANCE.txt",
+		"NÃO APTO PARA PRODUÇÃO",
+		"APTO PARA PRODUÇÃO",
+		"setProgress(99, \"Pós-recuperação aprovada\")",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("post-recovery health gate missing %q", want)
+		}
+	}
+}
+
+func TestHelpCoversPostRecoveryHealth(t *testing.T) {
+	text := helpText()
+	for _, want := range []string{"PÓS-RECUPERAÇÃO / SAÚDE", "RELATORIO_SAUDE_PERFORMANCE.txt", "APTO PARA PRODUÇÃO", "NÃO APTO PARA PRODUÇÃO", "PRIMARY KEY/UNIQUE inativos"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("help missing post-recovery concept %q", want)
 		}
 	}
 }

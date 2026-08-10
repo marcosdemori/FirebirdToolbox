@@ -29,11 +29,11 @@ import (
 	"unsafe"
 )
 
-var appVersion = "1.2.12"
+var appVersion = "1.2.14"
 var appCredit = "Projeto feito por Marcos De Mori Laiola"
 
 // Os BATs originais continuam incorporados como referencia/documentacao da logica
-// que originou o utilitario. A v1.2.12 executa gfix/gbak diretamente para manter
+// que originou o utilitario. A v1.2.14 executa gfix/gbak diretamente para manter
 // todo o log dentro da interface e permitir combinar versoes de origem/destino.
 //
 //go:embed scripts/*.bat LEIA-ME.md assets/*.ico
@@ -185,6 +185,11 @@ const (
 
 	idHelpCopy  = 4101
 	idHelpClose = 4102
+
+	idConflictKeep1  = 4201
+	idConflictKeep2  = 4202
+	idConflictExport = 4203
+	idConflictCancel = 4204
 
 	idHeaderTitle     = 3100
 	idSectionRoutine  = 3101
@@ -443,6 +448,7 @@ var (
 	mainHwnd        syscall.Handle
 	helpHwnd        syscall.Handle
 	helpContentHwnd syscall.Handle
+	conflictHwnd    syscall.Handle
 	controls        = map[int]syscall.Handle{}
 	guiFont         syscall.Handle
 	titleFont       syscall.Handle
@@ -471,6 +477,10 @@ var (
 	imageLists []uintptr
 	liveIcons  []syscall.Handle
 	iconCache  = map[string]syscall.Handle{}
+
+	conflictResolverMu       sync.Mutex
+	conflictResolverDecision conflictResolutionDecision
+	conflictResolverPath     string
 
 	buttonVisuals = map[int]buttonVisual{
 		idSourceBtn:      {Icon: "folder"},
@@ -1465,6 +1475,9 @@ func successSummary(c workflowConfig) (string, string) {
 	if h.PageSize != "" {
 		lines = append(lines, "Página: "+h.PageSize+" bytes")
 	}
+	if c.Routine.Kind == routineRepairAdvanced && strings.Contains(strings.ToUpper(recoveryState), "APTO PARA PRODUÇÃO") && c.Dest != "" {
+		lines = append(lines, "", "IMPORTANTE: o Toolbox não substitui automaticamente o banco usado pelo seu sistema.", "Confirme que a aplicação aponta para o arquivo gerado acima e não para o banco original corrompido.")
+	}
 	lines = append(lines, "", "Clique em OK para fechar esta confirmação.")
 	return strings.Join(lines, "\n"), compact
 }
@@ -1473,7 +1486,9 @@ func failureSummary(err error) string {
 	state := recoveryStateSnapshot()
 	upperState := strings.ToUpper(state)
 	message := "A rotina foi encerrada com erro."
-	if strings.Contains(upperState, "AGUARDANDO DECISÃO") {
+	if strings.Contains(upperState, "NÃO APTO PARA PRODUÇÃO") {
+		message = "O banco foi recuperado/restaurado, mas reprovou um ou mais gates críticos de saúde e NÃO deve ser colocado em produção."
+	} else if strings.Contains(upperState, "AGUARDANDO DECISÃO") {
 		message = "A recuperação foi interrompida para preservar um conflito de dados que exige decisão manual."
 	} else if strings.Contains(upperState, "PARCIAL") {
 		message = "A recuperação produziu apenas um resultado parcial para inspeção; o banco não foi aprovado como recuperação completa."
@@ -1487,6 +1502,12 @@ func failureSummary(err error) string {
 	}
 	if report != "" {
 		message += "\n\nRelatório de recuperação: " + report
+		if strings.Contains(upperState, "NÃO APTO PARA PRODUÇÃO") {
+			healthPath := filepath.Join(filepath.Dir(report), "RELATORIO_SAUDE_PERFORMANCE.txt")
+			if fileExists(healthPath) {
+				message += "\nRelatório de saúde: " + healthPath
+			}
+		}
 	}
 	return message + "\n\nConsulte o Log de execução para os detalhes técnicos."
 }
@@ -2024,9 +2045,14 @@ func backupFilePath(c workflowConfig) string {
 }
 
 type databaseHeader struct {
-	ODS      string
-	Dialect  string
-	PageSize string
+	ODS               string
+	Dialect           string
+	PageSize          string
+	OldestTransaction string
+	OldestActive      string
+	OldestSnapshot    string
+	NextTransaction   string
+	SweepInterval     string
 }
 
 func parseDatabaseHeader(output string) databaseHeader {
@@ -2041,6 +2067,16 @@ func parseDatabaseHeader(output string) databaseHeader {
 			h.Dialect = strings.TrimSpace(line[len("Database dialect"):])
 		case strings.HasPrefix(lower, "page size"):
 			h.PageSize = strings.TrimSpace(line[len("Page size"):])
+		case strings.HasPrefix(lower, "oldest transaction"):
+			h.OldestTransaction = strings.TrimSpace(line[len("Oldest transaction"):])
+		case strings.HasPrefix(lower, "oldest active"):
+			h.OldestActive = strings.TrimSpace(line[len("Oldest active"):])
+		case strings.HasPrefix(lower, "oldest snapshot"):
+			h.OldestSnapshot = strings.TrimSpace(line[len("Oldest snapshot"):])
+		case strings.HasPrefix(lower, "next transaction"):
+			h.NextTransaction = strings.TrimSpace(line[len("Next transaction"):])
+		case strings.HasPrefix(lower, "sweep interval"):
+			h.SweepInterval = strings.TrimSpace(line[len("Sweep interval"):])
 		}
 	}
 	return h
@@ -2080,6 +2116,430 @@ func validateRestoredHeader(ctx context.Context, c workflowConfig) error {
 	}
 	appendLog(strings.Join(parts, " | ") + ".")
 	return nil
+}
+
+type healthRowCount struct {
+	Relation  string
+	Reference int64
+	Final     int64
+	Checked   bool
+	Match     bool
+	Error     string
+}
+
+type postRecoveryHealth struct {
+	Checked             bool
+	DatabasePath        string
+	ReferencePath       string
+	Version             string
+	Header              databaseHeader
+	ConnectivityOK      bool
+	SweepOK             bool
+	ValidationOK        bool
+	Validation          recoveryStats
+	ValidationLegacy    bool
+	LimboCount          int
+	UserTableCount      int64
+	UserIndexCount      int64
+	PrimaryUniqueCount  int64
+	ReferenceTableCount int64
+	ReferenceIndexCount int64
+	ReferenceConstraint int64
+	InactiveIndexes     []string
+	InactiveConstraints []string
+	RowCounts           []healthRowCount
+	CriticalIssues      []string
+	Warnings            []string
+	Readiness           string
+}
+
+func markerInt64(output, prefix string) (int64, bool) {
+	items := markerLines(output, prefix)
+	if len(items) == 0 {
+		return 0, false
+	}
+	v, err := strconv.ParseInt(strings.TrimSpace(items[len(items)-1]), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+func healthMetadataScript() string {
+	// Evita COALESCE aqui para manter compatibilidade com Firebird 1.0;
+	// COALESCE só foi incorporado à engine a partir do Firebird 1.5.
+	return "SET HEADING OFF;\nSET LIST OFF;\nSET COUNT OFF;\n" +
+		"SELECT 'FTB_HEALTH_PING|OK' FROM RDB$DATABASE;\n" +
+		"SELECT 'FTB_HEALTH_TABLES|' || CAST(COUNT(*) AS VARCHAR(30)) FROM RDB$RELATIONS WHERE (RDB$SYSTEM_FLAG IS NULL OR RDB$SYSTEM_FLAG = 0) AND RDB$VIEW_BLR IS NULL;\n" +
+		"SELECT 'FTB_HEALTH_INDEXES|' || CAST(COUNT(*) AS VARCHAR(30)) FROM RDB$INDICES WHERE (RDB$SYSTEM_FLAG IS NULL OR RDB$SYSTEM_FLAG = 0);\n" +
+		"SELECT 'FTB_HEALTH_CONSTRAINTS|' || CAST(COUNT(*) AS VARCHAR(30)) FROM RDB$RELATION_CONSTRAINTS WHERE RDB$CONSTRAINT_TYPE IN ('PRIMARY KEY','UNIQUE');\n" +
+		"SELECT 'FTB_HEALTH_INACTIVE_INDEX|' || RDB$INDEX_NAME FROM RDB$INDICES WHERE (RDB$SYSTEM_FLAG IS NULL OR RDB$SYSTEM_FLAG = 0) AND RDB$INDEX_INACTIVE = 1 ORDER BY RDB$INDEX_NAME;\n" +
+		"SELECT 'FTB_HEALTH_INACTIVE_CONSTRAINT|' || rc.RDB$CONSTRAINT_NAME || '|' || rc.RDB$RELATION_NAME || '|' || rc.RDB$CONSTRAINT_TYPE || '|' || rc.RDB$INDEX_NAME FROM RDB$RELATION_CONSTRAINTS rc JOIN RDB$INDICES i ON i.RDB$INDEX_NAME = rc.RDB$INDEX_NAME WHERE rc.RDB$CONSTRAINT_TYPE IN ('PRIMARY KEY','UNIQUE') AND i.RDB$INDEX_INACTIVE = 1 ORDER BY rc.RDB$RELATION_NAME, rc.RDB$CONSTRAINT_NAME;\n" +
+		"QUIT;\n"
+}
+
+func loadHealthMetadata(ctx context.Context, root, version, port, user, password, dbPath string) (postRecoveryHealth, error) {
+	var h postRecoveryHealth
+	out, err := runISQLScript(ctx, root, version, port, user, password, dbPath, "Conferindo metadados e índices do banco pós-recuperação...", healthMetadataScript())
+	if err != nil {
+		return h, err
+	}
+	h.ConnectivityOK = len(markerLines(out, "FTB_HEALTH_PING|")) > 0
+	if n, ok := markerInt64(out, "FTB_HEALTH_TABLES|"); ok {
+		h.UserTableCount = n
+	}
+	if n, ok := markerInt64(out, "FTB_HEALTH_INDEXES|"); ok {
+		h.UserIndexCount = n
+	}
+	if n, ok := markerInt64(out, "FTB_HEALTH_CONSTRAINTS|"); ok {
+		h.PrimaryUniqueCount = n
+	}
+	h.InactiveIndexes = markerLines(out, "FTB_HEALTH_INACTIVE_INDEX|")
+	for i := range h.InactiveIndexes {
+		h.InactiveIndexes[i] = strings.TrimSpace(h.InactiveIndexes[i])
+	}
+	for _, item := range markerLines(out, "FTB_HEALTH_INACTIVE_CONSTRAINT|") {
+		parts := strings.Split(item, "|")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		h.InactiveConstraints = append(h.InactiveConstraints, strings.Join(parts, "|"))
+	}
+	return h, nil
+}
+
+func healthRelevantRelations(r *recoveryReport) []string {
+	seen := map[string]bool{}
+	var result []string
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		key := strings.ToUpper(value)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		result = append(result, value)
+	}
+	add(r.RowRescueRelation)
+	add(r.SuspectedRelation)
+	for _, conflict := range r.DuplicateConflicts {
+		add(conflict.Relation)
+	}
+	return result
+}
+
+func countRelationRows(ctx context.Context, root, version, port, user, password, dbPath, relation string) (int64, error) {
+	marker := "FTB_HEALTH_ROWCOUNT|"
+	script := "SET HEADING OFF;\nSET LIST OFF;\nSET COUNT OFF;\nSELECT '" + marker + "' || CAST(COUNT(*) AS VARCHAR(30)) FROM " + sqlIdentifier(relation) + " T PLAN (T NATURAL);\nQUIT;\n"
+	out, err := runISQLScript(ctx, root, version, port, user, password, dbPath, "Conferindo quantidade de registros em "+relation+"...", script)
+	if err != nil {
+		return 0, err
+	}
+	n, ok := markerInt64(out, marker)
+	if !ok {
+		return 0, fmt.Errorf("não foi possível interpretar a contagem de %s", relation)
+	}
+	return n, nil
+}
+
+func headerTransactionGap(h databaseHeader) (int64, bool) {
+	next, err1 := strconv.ParseInt(strings.TrimSpace(h.NextTransaction), 10, 64)
+	oit, err2 := strconv.ParseInt(strings.TrimSpace(h.OldestTransaction), 10, 64)
+	if err1 != nil || err2 != nil || next < oit {
+		return 0, false
+	}
+	return next - oit, true
+}
+
+func appendHealthIssue(h *postRecoveryHealth, issue string) {
+	issue = strings.TrimSpace(issue)
+	if issue != "" {
+		h.CriticalIssues = append(h.CriticalIssues, issue)
+	}
+}
+
+func appendHealthWarning(h *postRecoveryHealth, warning string) {
+	warning = strings.TrimSpace(warning)
+	if warning != "" {
+		h.Warnings = append(h.Warnings, warning)
+	}
+}
+
+func writeHealthReport(path string, h postRecoveryHealth, partial bool, hasFinalDestination bool) error {
+	if path == "" {
+		return errors.New("caminho do relatório de saúde não definido")
+	}
+	var b strings.Builder
+	b.WriteString("FIREBIRD TOOLBOX - RELATÓRIO DE SAÚDE E PÓS-RECUPERAÇÃO\r\n")
+	b.WriteString("Versão do utilitário: " + appVersion + "\r\n")
+	b.WriteString("Banco avaliado: " + h.DatabasePath + "\r\n")
+	b.WriteString("Firebird: " + h.Version + "\r\n")
+	if h.ReferencePath != "" {
+		b.WriteString("Restore de referência: " + h.ReferencePath + "\r\n")
+	}
+
+	b.WriteString("\r\nINTEGRIDADE E ACESSO\r\n")
+	b.WriteString(fmt.Sprintf("Banco acessível via SQL: %t\r\n", h.ConnectivityOK))
+	b.WriteString(fmt.Sprintf("Sweep final concluído: %t\r\n", h.SweepOK))
+	b.WriteString(fmt.Sprintf("Validação estrutural aprovada: %t\r\n", h.ValidationOK))
+	if h.ValidationLegacy {
+		b.WriteString("Validação legada: o gfix não reconheceu -no_update; a validação foi executada somente no banco restaurado.\r\n")
+	}
+	b.WriteString("Diagnóstico estrutural final: " + h.Validation.Summary() + "\r\n")
+	b.WriteString(fmt.Sprintf("Transações em limbo: %d\r\n", h.LimboCount))
+
+	b.WriteString("\r\nHEADER / TRANSAÇÕES\r\n")
+	if h.Header.ODS != "" {
+		b.WriteString("ODS: " + h.Header.ODS + "\r\n")
+	}
+	if h.Header.Dialect != "" {
+		b.WriteString("Dialeto: " + h.Header.Dialect + "\r\n")
+	}
+	if h.Header.PageSize != "" {
+		b.WriteString("Page size: " + h.Header.PageSize + " bytes\r\n")
+	}
+	if h.Header.OldestTransaction != "" {
+		b.WriteString("Oldest transaction: " + h.Header.OldestTransaction + "\r\n")
+	}
+	if h.Header.OldestActive != "" {
+		b.WriteString("Oldest active: " + h.Header.OldestActive + "\r\n")
+	}
+	if h.Header.OldestSnapshot != "" {
+		b.WriteString("Oldest snapshot: " + h.Header.OldestSnapshot + "\r\n")
+	}
+	if h.Header.NextTransaction != "" {
+		b.WriteString("Next transaction: " + h.Header.NextTransaction + "\r\n")
+	}
+	if h.Header.SweepInterval != "" {
+		b.WriteString("Sweep interval: " + h.Header.SweepInterval + "\r\n")
+	}
+	if gap, ok := headerTransactionGap(h.Header); ok {
+		b.WriteString(fmt.Sprintf("Gap Next/OIT: %d\r\n", gap))
+	}
+
+	b.WriteString("\r\nMETADADOS / ÍNDICES\r\n")
+	b.WriteString(fmt.Sprintf("Tabelas de usuário: %d\r\n", h.UserTableCount))
+	b.WriteString(fmt.Sprintf("Índices de usuário: %d\r\n", h.UserIndexCount))
+	b.WriteString(fmt.Sprintf("Constraints PRIMARY KEY/UNIQUE: %d\r\n", h.PrimaryUniqueCount))
+	if h.ReferencePath != "" {
+		b.WriteString(fmt.Sprintf("Referência - tabelas: %d | índices: %d | PK/UNIQUE: %d\r\n", h.ReferenceTableCount, h.ReferenceIndexCount, h.ReferenceConstraint))
+	}
+	if len(h.InactiveIndexes) == 0 {
+		b.WriteString("Índices inativos: 0\r\n")
+	} else {
+		b.WriteString("Índices inativos: " + strings.Join(h.InactiveIndexes, ", ") + "\r\n")
+	}
+	if len(h.InactiveConstraints) == 0 {
+		b.WriteString("PRIMARY KEY/UNIQUE inativas: 0\r\n")
+	} else {
+		b.WriteString("PRIMARY KEY/UNIQUE inativas: " + strings.Join(h.InactiveConstraints, "; ") + "\r\n")
+	}
+
+	if len(h.RowCounts) > 0 {
+		b.WriteString("\r\nCONTAGENS ESSENCIAIS\r\n")
+		for _, rc := range h.RowCounts {
+			if rc.Error != "" {
+				b.WriteString(rc.Relation + ": ERRO - " + rc.Error + "\r\n")
+			} else if rc.Checked {
+				b.WriteString(fmt.Sprintf("%s: final=%d | referência=%d | confere=%t\r\n", rc.Relation, rc.Final, rc.Reference, rc.Match))
+			} else {
+				b.WriteString(fmt.Sprintf("%s: final=%d\r\n", rc.Relation, rc.Final))
+			}
+		}
+	}
+
+	if len(h.Warnings) > 0 {
+		b.WriteString("\r\nAVISOS\r\n")
+		for _, item := range h.Warnings {
+			b.WriteString("- " + item + "\r\n")
+		}
+	}
+	if len(h.CriticalIssues) > 0 {
+		b.WriteString("\r\nGATES CRÍTICOS REPROVADOS\r\n")
+		for _, item := range h.CriticalIssues {
+			b.WriteString("- " + item + "\r\n")
+		}
+	}
+
+	b.WriteString("\r\nRESULTADO\r\n")
+	b.WriteString("Estado de saúde: " + h.Readiness + "\r\n")
+	if partial && len(h.CriticalIssues) == 0 {
+		b.WriteString("Observação: a estrutura passou nos gates, porém houve recuperação parcial/decisão de dados; exige homologação funcional antes de produção.\r\n")
+	}
+	if !hasFinalDestination && len(h.CriticalIssues) == 0 {
+		b.WriteString("Observação: a análise foi feita no restore de teste; nenhum banco final foi liberado para produção nesta execução.\r\n")
+	}
+	return os.WriteFile(path, []byte(b.String()), 0600)
+}
+
+func runPostRecoveryHealth(ctx context.Context, c workflowConfig, dbPath, referencePath, healthPath string, report *recoveryReport) (postRecoveryHealth, error) {
+	var h postRecoveryHealth
+	h.Checked = true
+	h.DatabasePath = dbPath
+	h.ReferencePath = referencePath
+	version, root, port := testRestoreEngine(c)
+	if c.TargetVersion != "" && strings.EqualFold(filepath.Clean(dbPath), filepath.Clean(c.Dest)) {
+		version, root, port = c.TargetVersion, c.FbTarget, c.TargetPort
+	}
+	h.Version = version
+
+	setStatus("Executando pós-recuperação e gates de saúde...")
+	setProgress(94, "Pós-recuperação: verificando saúde...")
+	resolvedPort, err := verifyFirebirdEndpoint(ctx, "do pós-recuperação", version, root, "", port)
+	if err != nil {
+		appendHealthIssue(&h, "não foi possível confirmar a instância Firebird do banco restaurado: "+err.Error())
+		h.Readiness = "NÃO APTO PARA PRODUÇÃO"
+		_ = writeHealthReport(healthPath, h, report.PartialRecovery, c.TargetVersion != "")
+		return h, errors.New("pós-recuperação não conseguiu acessar a instância Firebird")
+	}
+
+	meta, metaErr := loadHealthMetadata(ctx, root, version, resolvedPort, c.User, c.Password, dbPath)
+	if metaErr != nil {
+		appendHealthIssue(&h, "banco não pôde ser aberto por SQL no pós-recuperação: "+metaErr.Error())
+	} else {
+		h.ConnectivityOK = meta.ConnectivityOK
+		h.UserTableCount = meta.UserTableCount
+		h.UserIndexCount = meta.UserIndexCount
+		h.PrimaryUniqueCount = meta.PrimaryUniqueCount
+		h.InactiveIndexes = meta.InactiveIndexes
+		h.InactiveConstraints = meta.InactiveConstraints
+		if !h.ConnectivityOK {
+			appendHealthIssue(&h, "o banco não respondeu ao SELECT de verificação")
+		}
+		if len(h.InactiveIndexes) > 0 {
+			appendHealthIssue(&h, fmt.Sprintf("%d índice(s) de usuário permanecem inativos: %s", len(h.InactiveIndexes), strings.Join(h.InactiveIndexes, ", ")))
+		}
+		if len(h.InactiveConstraints) > 0 {
+			appendHealthIssue(&h, fmt.Sprintf("%d constraint(s) PRIMARY KEY/UNIQUE permanecem inativas: %s", len(h.InactiveConstraints), strings.Join(h.InactiveConstraints, "; ")))
+		}
+	}
+
+	if referencePath != "" && fileExists(referencePath) && !strings.EqualFold(filepath.Clean(referencePath), filepath.Clean(dbPath)) {
+		refMeta, refErr := loadHealthMetadata(ctx, root, version, resolvedPort, c.User, c.Password, referencePath)
+		if refErr != nil {
+			appendHealthWarning(&h, "não foi possível comparar metadados com o restore de referência: "+refErr.Error())
+		} else {
+			h.ReferenceTableCount = refMeta.UserTableCount
+			h.ReferenceIndexCount = refMeta.UserIndexCount
+			h.ReferenceConstraint = refMeta.PrimaryUniqueCount
+			if h.UserTableCount != h.ReferenceTableCount {
+				appendHealthIssue(&h, fmt.Sprintf("quantidade de tabelas divergiu do restore de referência: final=%d referência=%d", h.UserTableCount, h.ReferenceTableCount))
+			}
+			if h.UserIndexCount != h.ReferenceIndexCount {
+				appendHealthIssue(&h, fmt.Sprintf("quantidade de índices divergiu do restore de referência: final=%d referência=%d", h.UserIndexCount, h.ReferenceIndexCount))
+			}
+			if h.PrimaryUniqueCount != h.ReferenceConstraint {
+				appendHealthIssue(&h, fmt.Sprintf("quantidade de PRIMARY KEY/UNIQUE divergiu do restore de referência: final=%d referência=%d", h.PrimaryUniqueCount, h.ReferenceConstraint))
+			}
+		}
+	}
+
+	gfix := firebirdExe(root, version, "gfix.exe")
+	conn := databaseConnection(resolvedPort, dbPath)
+	limboOutput, limboErr := runRecoveryCapture(ctx, "Pós-recuperação: conferindo transações em limbo...", gfix, "-user", c.User, "-pass", c.Password, "-list", conn)
+	if limboErr != nil && toolOutputHasOperationalFailure(limboOutput) {
+		appendHealthIssue(&h, "não foi possível concluir a verificação de transações em limbo")
+	} else {
+		h.LimboCount = countLimboTransactions(limboOutput)
+		if h.LimboCount > 0 {
+			appendHealthIssue(&h, fmt.Sprintf("%d transação(ões) em limbo permanecem no banco restaurado", h.LimboCount))
+		}
+	}
+
+	setProgress(96, "Pós-recuperação: executando sweep final...")
+	sweepOutput, sweepErr := runRecoveryCapture(ctx, "Pós-recuperação: executando sweep final...", gfix, "-user", c.User, "-pass", c.Password, "-sweep", conn)
+	if sweepErr != nil || toolOutputHasOperationalFailure(sweepOutput) {
+		appendHealthIssue(&h, "sweep final não foi concluído com segurança")
+	} else {
+		h.SweepOK = true
+	}
+
+	setProgress(97, "Pós-recuperação: validação estrutural final...")
+	validateArgs := []string{"-user", c.User, "-pass", c.Password, "-v", "-full", "-no_update", conn}
+	validationOutput, validationErr := runRecoveryCapture(ctx, "Pós-recuperação: validação estrutural final (somente leitura)...", gfix, validateArgs...)
+	if outputReportsUnknownSwitch(validationOutput) {
+		h.ValidationLegacy = true
+		appendHealthWarning(&h, "o gfix desta versão não reconhece -no_update; a validação final foi repetida somente no banco restaurado usando o modo legado")
+		validationOutput, validationErr = runRecoveryCapture(ctx, "Pós-recuperação: validação estrutural final (modo legado, somente no restaurado)...", gfix, "-user", c.User, "-pass", c.Password, "-v", "-full", conn)
+	}
+	h.Validation = parseRecoveryStats(validationOutput)
+	if validationErr != nil && !h.Validation.HasCorruption() {
+		appendHealthIssue(&h, "gfix não conseguiu concluir a validação estrutural final")
+	} else if toolOutputHasOperationalFailure(validationOutput) && !h.Validation.HasCorruption() {
+		appendHealthIssue(&h, "gfix reportou falha operacional durante a validação estrutural final")
+	} else if h.Validation.HasCorruption() {
+		appendHealthIssue(&h, "a validação final ainda encontrou corrupção: "+h.Validation.Summary())
+	} else {
+		h.ValidationOK = true
+	}
+
+	gstat := firebirdExe(root, version, "gstat.exe")
+	if fileExists(gstat) {
+		headerOutput, headerErr := runRecoveryCapture(ctx, "Pós-recuperação: conferindo header e indicadores transacionais...", gstat, "-h", conn)
+		if headerErr != nil {
+			appendHealthIssue(&h, "gstat não conseguiu ler o header do banco restaurado")
+		} else {
+			h.Header = parseDatabaseHeader(headerOutput)
+			if gap, ok := headerTransactionGap(h.Header); ok {
+				if sweepInt, parseErr := strconv.ParseInt(strings.TrimSpace(h.Header.SweepInterval), 10, 64); parseErr == nil && sweepInt > 0 && gap > sweepInt*2 {
+					appendHealthWarning(&h, fmt.Sprintf("gap transacional Next/OIT (%d) está acima de duas vezes o sweep interval (%d); acompanhe após colocar o banco em uso", gap, sweepInt))
+				}
+			}
+		}
+	} else {
+		appendHealthWarning(&h, "gstat.exe não foi encontrado; ODS e indicadores transacionais não puderam ser reconferidos")
+	}
+
+	for _, relation := range healthRelevantRelations(report) {
+		rc := healthRowCount{Relation: relation}
+		finalCount, countErr := countRelationRows(ctx, root, version, resolvedPort, c.User, c.Password, dbPath, relation)
+		if countErr != nil {
+			rc.Error = countErr.Error()
+			appendHealthIssue(&h, "não foi possível contar a relação crítica "+relation+": "+countErr.Error())
+			h.RowCounts = append(h.RowCounts, rc)
+			continue
+		}
+		rc.Final = finalCount
+		if referencePath != "" && fileExists(referencePath) && !strings.EqualFold(filepath.Clean(referencePath), filepath.Clean(dbPath)) {
+			refCount, refErr := countRelationRows(ctx, root, version, resolvedPort, c.User, c.Password, referencePath, relation)
+			if refErr != nil {
+				rc.Error = "referência: " + refErr.Error()
+				appendHealthIssue(&h, "não foi possível conferir a relação crítica "+relation+" no restore de referência")
+			} else {
+				rc.Reference = refCount
+				rc.Checked = true
+				rc.Match = refCount == finalCount
+				if !rc.Match {
+					appendHealthIssue(&h, fmt.Sprintf("contagem da relação %s divergiu: final=%d referência=%d", relation, finalCount, refCount))
+				}
+			}
+		}
+		h.RowCounts = append(h.RowCounts, rc)
+	}
+
+	if h.Header.ODS != "" || h.Header.Dialect != "" || h.Header.PageSize != "" {
+		setLastHeader(h.Header)
+	}
+
+	if len(h.CriticalIssues) > 0 {
+		h.Readiness = "NÃO APTO PARA PRODUÇÃO"
+	} else if report.PartialRecovery {
+		h.Readiness = "ESTRUTURALMENTE SAUDÁVEL; REVISÃO FUNCIONAL OBRIGATÓRIA"
+	} else if c.TargetVersion != "" {
+		h.Readiness = "APTO PARA PRODUÇÃO"
+	} else {
+		h.Readiness = "RESTORE DE TESTE SAUDÁVEL"
+	}
+	if err := writeHealthReport(healthPath, h, report.PartialRecovery, c.TargetVersion != ""); err != nil {
+		appendHealthWarning(&h, "não foi possível gravar o relatório de saúde: "+err.Error())
+	}
+	if len(h.CriticalIssues) > 0 {
+		return h, fmt.Errorf("pós-recuperação reprovou %d gate(s) crítico(s); banco não foi liberado para produção", len(h.CriticalIssues))
+	}
+	return h, nil
 }
 
 func restoreBackup(ctx context.Context, c workflowConfig, backup string) error {
@@ -3309,6 +3769,9 @@ type recoveryReport struct {
 	TestODS                   string
 	TestDialect               string
 	TestPageSize              string
+	HealthReport              string
+	Health                    postRecoveryHealth
+	HealthChecked             bool
 	FinalState                string
 	PartialRecovery           bool
 	Actions                   []string
@@ -3416,8 +3879,16 @@ func writeRecoveryReport(r recoveryReport) error {
 			} else if conflict.ComparisonInconclusive {
 				b.WriteString("Comparação: inconclusiva; decisão explícita necessária antes de remover duplicidades.\r\n")
 			}
-			if conflict.UserAcceptedDataChoice {
-				b.WriteString("Decisão: usuário autorizou manter a primeira ocorrência física somente na cópia de trabalho.\r\n")
+			if len(conflict.BlobComparison) > 0 {
+				b.WriteString("Comparação de BLOBs/Fotos: " + strings.Join(conflict.BlobComparison, "; ") + "\r\n")
+			}
+			if conflict.ComparisonFile != "" {
+				b.WriteString("Comparação exportada: " + conflict.ComparisonFile + "\r\n")
+			}
+			if conflict.ChosenOccurrence > 0 {
+				b.WriteString(fmt.Sprintf("Decisão: usuário escolheu manter o REGISTRO %d somente na cópia de trabalho.\r\n", conflict.ChosenOccurrence))
+			} else if conflict.UserAcceptedDataChoice {
+				b.WriteString("Decisão: usuário autorizou saneamento explícito somente na cópia de trabalho.\r\n")
 			}
 			b.WriteString("\r\n")
 		}
@@ -3472,6 +3943,19 @@ func writeRecoveryReport(r recoveryReport) error {
 	}
 	if r.DuplicateRepairedBackup != "" {
 		b.WriteString("Backup após saneamento de duplicidades: " + r.DuplicateRepairedBackup + "\r\n")
+	}
+	if r.HealthReport != "" {
+		b.WriteString("Relatório de saúde e pós-recuperação: " + r.HealthReport + "\r\n")
+	}
+
+	if r.HealthChecked {
+		b.WriteString("\r\nPÓS-RECUPERAÇÃO / SAÚDE\r\n")
+		b.WriteString("Estado de saúde: " + r.Health.Readiness + "\r\n")
+		b.WriteString(fmt.Sprintf("Banco acessível: %t | Sweep final: %t | Validação estrutural: %t\r\n", r.Health.ConnectivityOK, r.Health.SweepOK, r.Health.ValidationOK))
+		b.WriteString(fmt.Sprintf("Tabelas: %d | Índices: %d | PRIMARY KEY/UNIQUE: %d | Índices inativos: %d | Constraints inativas: %d\r\n", r.Health.UserTableCount, r.Health.UserIndexCount, r.Health.PrimaryUniqueCount, len(r.Health.InactiveIndexes), len(r.Health.InactiveConstraints)))
+		if len(r.Health.CriticalIssues) > 0 {
+			b.WriteString("Gates críticos reprovados: " + strings.Join(r.Health.CriticalIssues, " | ") + "\r\n")
+		}
 	}
 
 	b.WriteString("\r\nAÇÕES EXECUTADAS\r\n")
@@ -3679,6 +4163,9 @@ type restoreDuplicateConflict struct {
 	ComparisonInconclusive bool
 	Identical              bool
 	UserAcceptedDataChoice bool
+	ChosenOccurrence       int
+	ComparisonFile         string
+	BlobComparison         []string
 	RowsRemoved            int64
 }
 
@@ -3908,17 +4395,290 @@ func analyzeDuplicateConflict(ctx context.Context, root, version, port, user, pa
 	return conflict, export, nil
 }
 
-func duplicateCleanupScript(conflict restoreDuplicateConflict) (string, error) {
+type duplicateOccurrenceDetails struct {
+	Ordinal int
+	Values  map[string]string
+	Blobs   map[string]string
+}
+
+type conflictResolutionDecision int
+
+const (
+	conflictResolutionCancel conflictResolutionDecision = iota
+	conflictResolutionKeep1
+	conflictResolutionKeep2
+)
+
+type duplicateResolutionView struct {
+	SummaryText string
+	Record1Text string
+	Record2Text string
+	DetailsText string
+	FilePath    string
+}
+
+func containsStringFold(items []string, value string) bool {
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item), strings.TrimSpace(value)) {
+			return true
+		}
+	}
+	return false
+}
+
+func removeStringFold(items []string, value string) []string {
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		if !strings.EqualFold(strings.TrimSpace(item), strings.TrimSpace(value)) {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func duplicateSummaryColumns(meta relationMetadata, conflict restoreDuplicateConflict) []relationColumn {
+	wanted := []string{}
+	for _, key := range conflict.KeyParts {
+		wanted = append(wanted, key.Column)
+	}
+	wanted = append(wanted, conflict.DifferingColumns...)
+	wanted = append(wanted,
+		"COD_ESTQ", "NOM_DOCIT", "NOME", "DESCRICAO", "DESC_DOCIT", "QTDE_DOCIT", "QUANTIDADE",
+		"PRECO_DOCIT", "PRECO", "TOTAL_DOCIT", "TOTAL", "UN_DOCIT", "NUMPED_DOC", "NUM_DOC",
+		"EMISS_DOC", "DTINS_DOCIT", "DATA", "CODBAR_PROD",
+	)
+	var result []relationColumn
+	seen := map[string]bool{}
+	appendCol := func(col relationColumn) {
+		key := strings.ToUpper(strings.TrimSpace(col.Name))
+		if key == "" || seen[key] || col.HasArray || col.FieldType == 261 {
+			return
+		}
+		seen[key] = true
+		result = append(result, col)
+	}
+	for _, name := range wanted {
+		for _, col := range meta.Columns {
+			if strings.EqualFold(col.Name, name) {
+				appendCol(col)
+				break
+			}
+		}
+	}
+	for _, col := range meta.Columns {
+		if len(result) >= 16 {
+			break
+		}
+		appendCol(col)
+	}
+	return result
+}
+
+func duplicateOccurrenceDetailScript(meta relationMetadata, conflict restoreDuplicateConflict, ordinal int, columns []relationColumn, version string) (string, error) {
+	where, err := duplicateKeyPredicate(conflict, "T")
+	if err != nil {
+		return "", err
+	}
+	skip := ordinal - 1
+	if skip < 0 {
+		skip = 0
+	}
+	var b strings.Builder
+	b.WriteString("SET HEADING OFF;\nSET LIST OFF;\nSET COUNT OFF;\n")
+	for _, col := range columns {
+		q := sqlIdentifier(col.Name)
+		expr := "COALESCE(CAST(T." + q + " AS VARCHAR(1000)), '<null>')"
+		b.WriteString(fmt.Sprintf("SELECT FIRST 1 SKIP %d 'FTB_VALUE|%s|' || %s FROM %s T WHERE %s PLAN (T NATURAL);\n", skip, strings.ReplaceAll(col.Name, "'", "''"), expr, sqlIdentifier(meta.Name), where))
+	}
+	if versionNumber(version) >= 4.0 {
+		for _, col := range meta.Columns {
+			if col.FieldType != 261 || col.HasArray {
+				continue
+			}
+			q := sqlIdentifier(col.Name)
+			expr := "CASE WHEN T." + q + " IS NULL THEN '<null>' ELSE CAST(HEX_ENCODE(CRYPT_HASH(T." + q + " USING SHA256)) AS VARCHAR(80)) END"
+			b.WriteString(fmt.Sprintf("SELECT FIRST 1 SKIP %d 'FTB_BLOB|%s|' || %s FROM %s T WHERE %s PLAN (T NATURAL);\n", skip, strings.ReplaceAll(col.Name, "'", "''"), expr, sqlIdentifier(meta.Name), where))
+		}
+	}
+	b.WriteString("QUIT;\n")
+	return b.String(), nil
+}
+
+func loadDuplicateOccurrenceDetails(ctx context.Context, root, version, port, user, password, dbPath string, meta relationMetadata, conflict restoreDuplicateConflict, ordinal int) (duplicateOccurrenceDetails, error) {
+	result := duplicateOccurrenceDetails{Ordinal: ordinal, Values: map[string]string{}, Blobs: map[string]string{}}
+	script, err := duplicateOccurrenceDetailScript(meta, conflict, ordinal, duplicateSummaryColumns(meta, conflict), version)
+	if err != nil {
+		return result, err
+	}
+	out, err := runISQLScript(ctx, root, version, port, user, password, dbPath, fmt.Sprintf("Lendo detalhes da ocorrência %d de %s...", ordinal, conflict.Relation), script)
+	if err != nil {
+		return result, err
+	}
+	for _, line := range markerLines(out, "FTB_VALUE|") {
+		parts := strings.SplitN(line, "|", 2)
+		if len(parts) == 2 {
+			result.Values[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		}
+	}
+	for _, line := range markerLines(out, "FTB_BLOB|") {
+		parts := strings.SplitN(line, "|", 2)
+		if len(parts) == 2 {
+			result.Blobs[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		}
+	}
+	return result, nil
+}
+
+func applyBlobComparison(conflict *restoreDuplicateConflict, first, second duplicateOccurrenceDetails, meta relationMetadata, version string) {
+	if conflict == nil {
+		return
+	}
+	var notes []string
+	for _, col := range meta.Columns {
+		if col.FieldType != 261 || col.HasArray {
+			continue
+		}
+		name := col.Name
+		h1, ok1 := first.Blobs[name]
+		h2, ok2 := second.Blobs[name]
+		if versionNumber(version) < 4.0 || !ok1 || !ok2 {
+			notes = append(notes, name+": SHA-256 indisponível nesta versão do Firebird")
+			continue
+		}
+		if h1 == h2 {
+			notes = append(notes, name+": SHA-256 igual ("+h1+")")
+			conflict.InconclusiveColumns = removeStringFold(conflict.InconclusiveColumns, name)
+		} else {
+			notes = append(notes, name+": SHA-256 DIFERENTE | registro 1="+h1+" | registro 2="+h2)
+			if !containsStringFold(conflict.DifferingColumns, name) {
+				conflict.DifferingColumns = append(conflict.DifferingColumns, name)
+			}
+			conflict.InconclusiveColumns = removeStringFold(conflict.InconclusiveColumns, name)
+		}
+	}
+	conflict.BlobComparison = notes
+	conflict.ComparisonInconclusive = len(conflict.InconclusiveColumns) > 0
+	conflict.Identical = len(conflict.DifferingColumns) == 0 && len(conflict.InconclusiveColumns) == 0
+}
+
+func sortedMapKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	for i := 0; i < len(keys); i++ {
+		for j := i + 1; j < len(keys); j++ {
+			if strings.ToUpper(keys[j]) < strings.ToUpper(keys[i]) {
+				keys[i], keys[j] = keys[j], keys[i]
+			}
+		}
+	}
+	return keys
+}
+
+func formatDuplicateOccurrence(details duplicateOccurrenceDetails, columns []relationColumn, conflict restoreDuplicateConflict) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("REGISTRO %d\r\n", details.Ordinal))
+	b.WriteString(strings.Repeat("-", 36) + "\r\n")
+	for _, col := range columns {
+		if value, ok := details.Values[col.Name]; ok {
+			prefix := ""
+			if containsStringFold(conflict.DifferingColumns, col.Name) {
+				prefix = "[DIFERENTE] "
+			} else if containsStringFold(conflict.InconclusiveColumns, col.Name) {
+				prefix = "[INCONCLUSIVO] "
+			}
+			b.WriteString(prefix + col.Name + ": " + value + "\r\n")
+		}
+	}
+	if len(details.Blobs) > 0 {
+		b.WriteString("\r\nBLOBs/Fotos (SHA-256)\r\n")
+		for _, name := range sortedMapKeys(details.Blobs) {
+			prefix := ""
+			if containsStringFold(conflict.DifferingColumns, name) {
+				prefix = "[DIFERENTE] "
+			} else if containsStringFold(conflict.InconclusiveColumns, name) {
+				prefix = "[INCONCLUSIVO] "
+			}
+			b.WriteString(prefix + name + ": " + details.Blobs[name] + "\r\n")
+		}
+	}
+	return b.String()
+}
+
+func duplicateComparisonFilePath(reportPath string, conflict restoreDuplicateConflict, round int) string {
+	return filepath.Join(filepath.Dir(reportPath), fmt.Sprintf("COMPARACAO_CONFLITO_%s_%02d.txt", sanitizeFilePart(conflict.Relation), round))
+}
+
+func buildDuplicateResolutionView(ctx context.Context, root, version, port, user, password, dbPath, reportPath string, conflict *restoreDuplicateConflict, round int) (duplicateResolutionView, error) {
+	var view duplicateResolutionView
+	if conflict == nil {
+		return view, errors.New("conflito não informado")
+	}
+	meta, err := loadRelationMetadataAt(ctx, root, version, port, user, password, dbPath, conflict.Relation)
+	if err != nil {
+		return view, err
+	}
+	first, err := loadDuplicateOccurrenceDetails(ctx, root, version, port, user, password, dbPath, meta, *conflict, 1)
+	if err != nil {
+		return view, err
+	}
+	second, err := loadDuplicateOccurrenceDetails(ctx, root, version, port, user, password, dbPath, meta, *conflict, 2)
+	if err != nil {
+		return view, err
+	}
+	applyBlobComparison(conflict, first, second, meta, version)
+	cols := duplicateSummaryColumns(meta, *conflict)
+	view.Record1Text = formatDuplicateOccurrence(first, cols, *conflict)
+	view.Record2Text = formatDuplicateOccurrence(second, cols, *conflict)
+	var summary strings.Builder
+	summary.WriteString("Tabela: " + conflict.Relation + "\r\n")
+	summary.WriteString("Chave: " + duplicateConflictKeyLabel(*conflict) + "\r\n")
+	summary.WriteString(fmt.Sprintf("Ocorrências encontradas: %d\r\n", conflict.Occurrences))
+	if len(conflict.DifferingColumns) > 0 {
+		summary.WriteString("Campos diferentes: " + strings.Join(conflict.DifferingColumns, ", ") + "\r\n")
+	}
+	if len(conflict.InconclusiveColumns) > 0 {
+		summary.WriteString("Ainda inconclusivo: " + strings.Join(conflict.InconclusiveColumns, ", ") + "\r\n")
+	}
+	if len(conflict.BlobComparison) > 0 {
+		summary.WriteString("\r\nComparação de BLOBs/Fotos:\r\n")
+		for _, note := range conflict.BlobComparison {
+			summary.WriteString("- " + note + "\r\n")
+		}
+	}
+	view.SummaryText = summary.String()
+	view.DetailsText = "Escolha explicitamente qual registro deve permanecer na CÓPIA DE TRABALHO.\r\nO banco original e a cópia de inspeção permanecem preservados.\r\nApós a escolha, o Toolbox continua automaticamente: índices → validação → novo backup → restore de teste."
+	view.FilePath = duplicateComparisonFilePath(reportPath, *conflict, round)
+	full := "FIREBIRD TOOLBOX - COMPARAÇÃO DE CONFLITO\r\nVersão: " + appVersion + "\r\n\r\n" + view.SummaryText + "\r\n" + view.Record1Text + "\r\n" + view.Record2Text + "\r\n" + view.DetailsText + "\r\n"
+	if err := os.WriteFile(view.FilePath, []byte(full), 0600); err != nil {
+		return view, err
+	}
+	conflict.ComparisonFile = view.FilePath
+	return view, nil
+}
+
+func duplicateCleanupKeepOccurrenceScript(conflict restoreDuplicateConflict, keepOrdinal int) (string, error) {
+	if keepOrdinal < 1 {
+		return "", errors.New("ocorrência escolhida inválida")
+	}
 	where, err := duplicateKeyPredicate(conflict, "T")
 	if err != nil {
 		return "", err
 	}
 	var b strings.Builder
 	b.WriteString("SET BAIL ON;\nSET TERM ^;\nEXECUTE BLOCK AS\n")
-	b.WriteString("DECLARE VARIABLE K CHAR(8) CHARACTER SET OCTETS;\nDECLARE VARIABLE N INTEGER;\nBEGIN\n  N = 0;\n")
+	b.WriteString("DECLARE VARIABLE K CHAR(8) CHARACTER SET OCTETS;\nDECLARE VARIABLE KEEP_K CHAR(8) CHARACTER SET OCTETS;\nDECLARE VARIABLE N INTEGER;\nBEGIN\n  N = 0;\n")
 	b.WriteString("  FOR SELECT T.RDB$DB_KEY FROM " + sqlIdentifier(conflict.Relation) + " T WHERE " + where + " PLAN (T NATURAL) INTO :K DO\n  BEGIN\n")
-	b.WriteString("    N = N + 1;\n    IF (N > 1) THEN DELETE FROM " + sqlIdentifier(conflict.Relation) + " WHERE RDB$DB_KEY = :K;\n  END\nEND^\nSET TERM ;^\nCOMMIT;\nQUIT;\n")
+	b.WriteString(fmt.Sprintf("    N = N + 1;\n    IF (N = %d) THEN KEEP_K = K;\n", keepOrdinal))
+	b.WriteString("  END\n")
+	b.WriteString("  FOR SELECT T.RDB$DB_KEY FROM " + sqlIdentifier(conflict.Relation) + " T WHERE " + where + " PLAN (T NATURAL) INTO :K DO\n  BEGIN\n")
+	b.WriteString("    IF (KEEP_K IS NOT NULL AND K <> KEEP_K) THEN DELETE FROM " + sqlIdentifier(conflict.Relation) + " WHERE RDB$DB_KEY = :K;\n  END\nEND^\nSET TERM ;^\nCOMMIT;\nQUIT;\n")
 	return b.String(), nil
+}
+
+func duplicateCleanupScript(conflict restoreDuplicateConflict) (string, error) {
+	return duplicateCleanupKeepOccurrenceScript(conflict, 1)
 }
 
 func constraintIndexName(ctx context.Context, root, version, port, user, password, dbPath string, conflict restoreDuplicateConflict) (string, error) {
@@ -4019,6 +4779,18 @@ func writeDuplicateConflictReport(path, snapshot string, conflicts []restoreDupl
 		if len(conflict.InconclusiveColumns) > 0 {
 			b.WriteString("Colunas não comparadas automaticamente: " + strings.Join(conflict.InconclusiveColumns, ", ") + "\r\n")
 		}
+		if len(conflict.BlobComparison) > 0 {
+			b.WriteString("Comparação de BLOBs/Fotos:\r\n")
+			for _, note := range conflict.BlobComparison {
+				b.WriteString("- " + note + "\r\n")
+			}
+		}
+		if conflict.ChosenOccurrence > 0 {
+			b.WriteString(fmt.Sprintf("Ocorrência escolhida para permanecer na cópia: REGISTRO %d\r\n", conflict.ChosenOccurrence))
+		}
+		if conflict.ComparisonFile != "" {
+			b.WriteString("Arquivo de comparação: " + conflict.ComparisonFile + "\r\n")
+		}
 		if conflict.RowsRemoved > 0 {
 			b.WriteString(fmt.Sprintf("Ocorrências extras removidas na CÓPIA DE TRABALHO: %d\r\n", conflict.RowsRemoved))
 		}
@@ -4085,6 +4857,11 @@ func repairRestoreDuplicateConflicts(ctx context.Context, c workflowConfig, back
 		if checked.Occurrences < 2 {
 			return "", fmt.Errorf("o restore reportou duplicidade em %s, mas a cópia parcial contém apenas %d ocorrência(s) da chave %s", checked.Relation, checked.Occurrences, duplicateConflictKeyLabel(checked))
 		}
+		if checked.Occurrences > 2 {
+			report.DuplicateConflictDetected = true
+			report.warning(fmt.Sprintf("A chave %s em %s possui %d ocorrências; o resolvedor visual desta versão exige exatamente duas para evitar remoção ambígua", duplicateConflictKeyLabel(checked), checked.Relation, checked.Occurrences))
+			return "", fmt.Errorf("conflito com %d ocorrências requer inspeção manual em %s (%s); nenhuma ocorrência foi removida", checked.Occurrences, checked.Relation, duplicateConflictKeyLabel(checked))
+		}
 		if checked.IndexName == "" {
 			checked.IndexName = conflict.IndexName
 		}
@@ -4095,33 +4872,51 @@ func repairRestoreDuplicateConflicts(ctx context.Context, c workflowConfig, back
 
 	for i := range analyzed {
 		conflict := &analyzed[i]
-		needsDecision := !conflict.Identical
-		if needsDecision {
-			comparison := "A comparação automática ficou inconclusiva."
-			if len(conflict.DifferingColumns) > 0 {
-				comparison = "Os registros possuem conteúdo diferente.\nCampos diferentes: " + strings.Join(conflict.DifferingColumns, ", ")
-			} else if len(conflict.InconclusiveColumns) > 0 {
-				comparison = "Há colunas que não podem ser comparadas automaticamente com segurança: " + strings.Join(conflict.InconclusiveColumns, ", ")
+		keepOrdinal := 1
+
+		if !conflict.Identical {
+			view, viewErr := buildDuplicateResolutionView(ctx, root, version, port, c.User, c.Password, testPath, report.ReportPath, conflict, round+i)
+			if viewErr != nil {
+				report.warning("Não foi possível montar a comparação visual completa: " + viewErr.Error())
+				view = duplicateResolutionView{
+					SummaryText: "Tabela: " + conflict.Relation + "\r\nChave: " + duplicateConflictKeyLabel(*conflict),
+					Record1Text: "Registro 1 preservado no banco de inspeção.",
+					Record2Text: "Registro 2 preservado no banco de inspeção.",
+					DetailsText: "A comparação detalhada falhou. Preserve os registros e revise CONFLITOS_DUPLICIDADE.txt antes de decidir.",
+					FilePath:    conflictReport,
+				}
 			}
-			msg := "Foi encontrada uma chave duplicada durante o restore.\n\nTabela: " + conflict.Relation + "\nChave: " + duplicateConflictKeyLabel(*conflict) + fmt.Sprintf("\nOcorrências: %d\n\n", conflict.Occurrences) + comparison + "\n\nAs ocorrências originais foram preservadas em:\n" + snapshot + "\n\nDetalhes completos:\n" + conflictReport + "\n\nDeseja continuar mantendo a PRIMEIRA ocorrência física e removendo somente as ocorrências extras NA CÓPIA DE TRABALHO?\n\nEscolha NÃO se precisar decidir manualmente qual registro deve permanecer."
-			if messageBox("Conflito de dados na chave primária", msg, MB_YESNO|MB_ICONWARNING) != IDYES {
-				report.DuplicateConflicts = append(report.DuplicateConflicts, analyzed...)
-				report.warning("Conflito de chave preservado sem escolha automática: " + conflict.Relation + " | " + duplicateConflictKeyLabel(*conflict))
-				report.FinalState = "CONFLITO DE DADOS AGUARDANDO DECISÃO; BANCO PARCIAL PRESERVADO"
-				return "", fmt.Errorf("conflito de dados requer decisão manual em %s (%s); nenhuma ocorrência foi removida", conflict.Relation, duplicateConflictKeyLabel(*conflict))
+
+			if conflict.Identical {
+				report.action("Duplicidade estrutural idêntica confirmada após comparar BLOBs/Fotos em " + conflict.Relation + "; a primeira ocorrência será preservada")
+			} else {
+				decision := showDuplicateConflictResolver(*conflict, view)
+				switch decision {
+				case conflictResolutionKeep1:
+					keepOrdinal = 1
+				case conflictResolutionKeep2:
+					keepOrdinal = 2
+				default:
+					report.DuplicateConflicts = append(report.DuplicateConflicts, analyzed...)
+					report.warning("Conflito de chave preservado sem escolha: " + conflict.Relation + " | " + duplicateConflictKeyLabel(*conflict))
+					report.FinalState = "CONFLITO DE DADOS AGUARDANDO DECISÃO; BANCO PARCIAL PRESERVADO"
+					_ = writeDuplicateConflictReport(conflictReport, snapshot, analyzed, exports)
+					return "", fmt.Errorf("conflito de dados requer decisão manual em %s (%s); nenhuma ocorrência foi removida", conflict.Relation, duplicateConflictKeyLabel(*conflict))
+				}
+				conflict.ChosenOccurrence = keepOrdinal
+				conflict.UserAcceptedDataChoice = true
+				report.PartialRecovery = true
+				report.warning(fmt.Sprintf("Usuário escolheu explicitamente manter o REGISTRO %d de %s para a chave %s; as outras ocorrências serão removidas somente na cópia de trabalho", keepOrdinal, conflict.Relation, duplicateConflictKeyLabel(*conflict)))
 			}
-			conflict.UserAcceptedDataChoice = true
-			report.PartialRecovery = true
-			report.warning("Usuário autorizou manter a primeira ocorrência física de uma chave com conteúdo diferente/inconclusivo em " + conflict.Relation + ": " + duplicateConflictKeyLabel(*conflict))
 		} else {
-			report.action("Duplicidade estrutural idêntica detectada em " + conflict.Relation + "; uma ocorrência será preservada")
+			report.action("Duplicidade estrutural idêntica detectada em " + conflict.Relation + "; a primeira ocorrência será preservada")
 		}
 
-		cleanup, err := duplicateCleanupScript(*conflict)
+		cleanup, err := duplicateCleanupKeepOccurrenceScript(*conflict, keepOrdinal)
 		if err != nil {
 			return "", err
 		}
-		if _, err := runISQLScript(ctx, root, version, port, c.User, c.Password, testPath, "Removendo apenas ocorrências extras da chave duplicada em "+conflict.Relation+"...", cleanup); err != nil {
+		if _, err := runISQLScript(ctx, root, version, port, c.User, c.Password, testPath, fmt.Sprintf("Mantendo o REGISTRO %d e removendo apenas ocorrências extras da chave duplicada em %s...", keepOrdinal, conflict.Relation), cleanup); err != nil {
 			return "", fmt.Errorf("não foi possível remover a duplicidade de %s: %w", conflict.Relation, err)
 		}
 		remaining, err := duplicateOccurrenceCount(ctx, root, version, port, c.User, c.Password, testPath, *conflict)
@@ -4133,7 +4928,7 @@ func repairRestoreDuplicateConflicts(ctx context.Context, c workflowConfig, back
 		}
 		conflict.RowsRemoved = conflict.Occurrences - 1
 		report.DuplicateRowsRemoved += conflict.RowsRemoved
-		report.action(fmt.Sprintf("Conflito %s / %s saneado na cópia de trabalho; %d ocorrência(s) extra(s) removida(s)", conflict.Relation, duplicateConflictKeyLabel(*conflict), conflict.RowsRemoved))
+		report.action(fmt.Sprintf("Conflito %s / %s saneado na cópia de trabalho; REGISTRO %d preservado e %d ocorrência(s) extra(s) removida(s)", conflict.Relation, duplicateConflictKeyLabel(*conflict), keepOrdinal, conflict.RowsRemoved))
 	}
 	report.DuplicateConflicts = append(report.DuplicateConflicts, analyzed...)
 	_ = writeDuplicateConflictReport(conflictReport, snapshot, analyzed, exports)
@@ -4301,6 +5096,7 @@ func runAdvancedRecovery(ctx context.Context, c workflowConfig) (retErr error) {
 		return fmt.Errorf("não foi possível criar a pasta de recuperação: %w", err)
 	}
 	technicalLogPath := filepath.Join(dir, "LOG_TECNICO_RECUPERACAO.txt")
+	healthReportPath := filepath.Join(dir, "RELATORIO_SAUDE_PERFORMANCE.txt")
 	setRecoveryTechnicalLog(technicalLogPath)
 	logSnapshot := snapshotFirebirdLog(c.FbSource)
 	report := recoveryReport{
@@ -4775,6 +5571,44 @@ func runAdvancedRecovery(ctx context.Context, c workflowConfig) (retErr error) {
 			report.FinalState = "BACKUP COMPLETO DE RECUPERAÇÃO CRIADO E VERIFICADO"
 		}
 	}
+
+	healthDB := testPath
+	healthReference := ""
+	if c.TargetVersion != "" {
+		healthDB = c.Dest
+		healthReference = testPath
+	}
+	report.HealthReport = healthReportPath
+	health, healthErr := runPostRecoveryHealth(ctx, c, healthDB, healthReference, healthReportPath, &report)
+	report.Health = health
+	report.HealthChecked = true
+	if healthErr != nil {
+		if !strings.Contains(strings.ToUpper(report.FinalState), "NÃO APTO PARA PRODUÇÃO") {
+			if report.FinalState != "" {
+				report.FinalState += "; "
+			}
+			report.FinalState += "NÃO APTO PARA PRODUÇÃO"
+		}
+		appendLog("ERRO: pós-recuperação reprovou o banco. Consulte RELATORIO_SAUDE_PERFORMANCE.txt antes de qualquer uso.")
+		return healthErr
+	}
+	report.action("Pós-recuperação aprovado: banco acessível, sweep final concluído, validação estrutural sem corrupção e nenhum índice/PK/UNIQUE inativo")
+	if c.TargetVersion != "" {
+		if report.PartialRecovery {
+			report.FinalState += "; ESTRUTURALMENTE SAUDÁVEL; REVISÃO FUNCIONAL OBRIGATÓRIA"
+		} else {
+			report.FinalState += "; APTO PARA PRODUÇÃO"
+		}
+	} else {
+		report.FinalState += "; SAÚDE DO RESTORE DE TESTE APROVADA"
+	}
+	setProgress(99, "Pós-recuperação aprovada")
+	appendLog("✓ Pós-recuperação aprovada: " + health.Readiness + ".")
+	appendLog("Relatório de saúde: " + healthReportPath)
+	if c.TargetVersion != "" && c.Dest != "" {
+		appendLog("IMPORTANTE: o Toolbox não troca automaticamente o banco usado pela aplicação. Use/configure o sistema para o arquivo final aprovado: " + c.Dest)
+		report.warning("O banco original não foi substituído automaticamente; antes de reabrir o sistema, confirme que a aplicação aponta para o destino final aprovado")
+	}
 	return nil
 }
 
@@ -4944,7 +5778,12 @@ func executeWorkflow() {
 		if err != nil {
 			appendLog("ERRO: " + err.Error())
 			state := strings.ToUpper(recoveryStateSnapshot())
-			if strings.Contains(state, "AGUARDANDO DECISÃO") || strings.Contains(state, "PARCIAL") {
+			if strings.Contains(state, "NÃO APTO PARA PRODUÇÃO") {
+				setStatus("Banco recuperado, mas reprovado nos gates de saúde; não usar em produção.")
+				setText(idResult, "⚠ Não apto para produção")
+				setTerminalProgress(PBST_ERROR, "Não apto para produção")
+				messageBox("Banco não apto para produção", failureSummary(err), MB_OK|MB_ICONERROR)
+			} else if strings.Contains(state, "AGUARDANDO DECISÃO") || strings.Contains(state, "PARCIAL") {
 				if strings.Contains(state, "AGUARDANDO DECISÃO") {
 					setStatus("Conflito de dados preservado; decisão manual necessária.")
 					setText(idResult, "⚠ Conflito aguardando decisão")
@@ -5026,8 +5865,9 @@ Corrigir banco (avançado)
 - Se uma relação específica continuar impedindo o backup, usa -skip_data apenas como base intermediária e tenta recolocar os registros legíveis no banco limpo.
 - A recuperação dos registros começa com leitura NATURAL, evitando índices corrompidos. Se necessário e houver chave primária numérica simples, o Toolbox divide a faixa da chave até isolar registros que realmente não podem ser lidos.
 - Se o restore falhar ao ativar uma PRIMARY KEY/UNIQUE por chave duplicada, o Toolbox NÃO usa -one_at_a_time: refaz a restauração com gbak -inactive (todos os índices inativos), preserva uma cópia para auditoria, identifica a chave problemática e compara as ocorrências.
-- Duplicidades logicamente idênticas podem ser saneadas automaticamente na cópia de trabalho, mantendo a primeira ocorrência física. Se houver campos diferentes ou comparação inconclusiva, o Toolbox exige confirmação explícita antes de manter a primeira ocorrência e preserva todas as versões no banco/relatório de conflitos.
+- Duplicidades logicamente idênticas podem ser saneadas automaticamente na cópia de trabalho, mantendo a primeira ocorrência física. Se houver campos diferentes, o Toolbox abre um resolvedor com REGISTRO 1 e REGISTRO 2 lado a lado, compara BLOBs/Fotos por SHA-256 quando a engine suporta, permite escolher explicitamente qual ocorrência manter, abrir a comparação exportada ou preservar ambos e cancelar. Após a escolha, a recuperação continua automaticamente.
 - Depois do saneamento, todos os índices são reconstruídos, um novo backup é criado e o restore de teste completo é repetido.
+- Depois da restauração final, executa pós-recuperação: acesso SQL, sweep final, gfix -validate -full, transações em limbo, índices/PRIMARY KEY/UNIQUE inativos, header e contagens essenciais. Um banco com gate crítico reprovado NÃO é marcado como apto para produção.
 
 Somente restaurar
 - Restaura um arquivo .BAK/.FBK para o banco de destino usando a versão selecionada.
@@ -5077,6 +5917,7 @@ Dentro da pasta RECOVERY_... podem ser criados:
 - *_RECOVERY_METADATA.BAK: backup somente de metadados quando o backup completo falha.
 - LOG_TECNICO_RECUPERACAO.txt: saída técnica completa das ferramentas.
 - RELATORIO_RECUPERACAO.txt: resumo do diagnóstico, ações, avisos, falhas e resultado final.
+- RELATORIO_SAUDE_PERFORMANCE.txt: gates pós-recuperação, índices/constraints, header, sweep, validação estrutural e contagens críticas.
 
 7. COMO INTERPRETAR ALGUNS ERROS
 "wrong page type" / "database page errors"
@@ -5101,7 +5942,14 @@ Falha do gbak em uma tabela
 - Se o erro for compatível com índice corrompido, tenta primeiro desativar índices não vinculados a constraints somente na cópia de trabalho e repete o backup sem excluir dados.
 - Se isso não resolver, em Firebird 3.0+ pode criar um backup-base com -skip_data e tentar recuperar os registros da tabela para um banco limpo.
 
-8. LOG RESUMIDO E DETALHADO
+8. PÓS-RECUPERAÇÃO / SAÚDE
+- O banco final só recebe APTO PARA PRODUÇÃO quando os gates críticos passam.
+- O Toolbox exige acesso SQL, sweep final concluído, validação estrutural sem corrupção, zero transações em limbo e zero índices/PRIMARY KEY/UNIQUE inativos.
+- Quando existe restore de teste e destino final, compara quantidades de tabelas, índices, constraints e as relações diretamente envolvidas na recuperação.
+- Recuperações parciais podem ficar ESTRUTURALMENTE SAUDÁVEIS, mas continuam exigindo revisão funcional antes de produção.
+- Se qualquer gate crítico falhar, o estado final é NÃO APTO PARA PRODUÇÃO e o banco não deve substituir o banco em uso.
+
+9. LOG RESUMIDO E DETALHADO
 Detalhado: não
 - Mostra etapas, avisos, erros e resultado final.
 
@@ -5109,14 +5957,14 @@ Detalhado: sim
 - Mostra comandos e saída técnica ampliada para diagnóstico.
 - No modo avançado, o log técnico completo também é preservado em arquivo mesmo quando a tela está resumida.
 
-9. BOAS PRÁTICAS DE SEGURANÇA
+10. BOAS PRÁTICAS DE SEGURANÇA
 - Nunca faça recuperação pesada diretamente sobre a única cópia do banco.
 - Mantenha o banco fora de uso durante validação/reparo sempre que possível.
 - Não apague a pasta RECOVERY_... antes de validar o sistema e os dados recuperados.
 - Após uma recuperação parcial, confira especialmente a relação indicada no relatório, as chaves não recuperadas e suas dependências.
 - Um backup só deve ser considerado confiável depois de um restore de teste aprovado.
 
-10. ONDE ENCONTRAR MAIS DETALHES
+11. ONDE ENCONTRAR MAIS DETALHES
 Use o botão Copiar ajuda para copiar este guia. Os arquivos LEIA-ME.md e README_FirebirdToolbox.md incluídos no pacote também documentam o funcionamento do utilitário.
 
 Firebird Toolbox v` + appVersion + `
@@ -5215,6 +6063,141 @@ func openHelp() {
 	createHelpControl(0, "BUTTON", "Fechar", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 662, 700, 100, 30, idHelpClose)
 	procShowWindow.Call(hwnd, SW_SHOW)
 	procUpdateWindow.Call(hwnd)
+}
+
+func createConflictControl(exStyle uint32, className, text string, style uint32, x, y, w, h int32, id int) syscall.Handle {
+	hwnd, _, _ := procCreateWindowExW.Call(
+		uintptr(exStyle), uintptr(unsafe.Pointer(u16(className))), uintptr(unsafe.Pointer(u16(text))), uintptr(style),
+		uintptr(x), uintptr(y), uintptr(w), uintptr(h), uintptr(conflictHwnd), uintptr(id), 0, 0,
+	)
+	handle := syscall.Handle(hwnd)
+	if guiFont != 0 {
+		procSendMessageW.Call(uintptr(handle), WM_SETFONT, uintptr(guiFont), 1)
+	}
+	return handle
+}
+
+func openConflictComparisonFile() {
+	path := strings.TrimSpace(conflictResolverPath)
+	if path == "" || !fileExists(path) {
+		return
+	}
+	cmd := exec.Command("notepad.exe", path)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	_ = cmd.Start()
+}
+
+func conflictWndProc(hwnd syscall.Handle, uMsg uint32, wParam, lParam uintptr) uintptr {
+	switch uMsg {
+	case WM_COMMAND:
+		id := int(uint16(wParam & 0xffff))
+		code := int(uint16((wParam >> 16) & 0xffff))
+		if code == BN_CLICKED {
+			switch id {
+			case idConflictKeep1:
+				conflictResolverDecision = conflictResolutionKeep1
+				procDestroyWindow.Call(uintptr(hwnd))
+				return 0
+			case idConflictKeep2:
+				conflictResolverDecision = conflictResolutionKeep2
+				procDestroyWindow.Call(uintptr(hwnd))
+				return 0
+			case idConflictExport:
+				openConflictComparisonFile()
+				return 0
+			case idConflictCancel:
+				conflictResolverDecision = conflictResolutionCancel
+				procDestroyWindow.Call(uintptr(hwnd))
+				return 0
+			}
+		}
+	case WM_CLOSE:
+		conflictResolverDecision = conflictResolutionCancel
+		procDestroyWindow.Call(uintptr(hwnd))
+		return 0
+	case WM_DESTROY:
+		conflictHwnd = 0
+		procPostQuitMessage.Call(0)
+		return 0
+	}
+	r, _, _ := procDefWindowProcW.Call(uintptr(hwnd), uintptr(uMsg), wParam, lParam)
+	return r
+}
+
+func showDuplicateConflictResolver(conflict restoreDuplicateConflict, view duplicateResolutionView) conflictResolutionDecision {
+	conflictResolverMu.Lock()
+	defer conflictResolverMu.Unlock()
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	conflictResolverDecision = conflictResolutionCancel
+	conflictResolverPath = view.FilePath
+	procEnableWindow.Call(uintptr(mainHwnd), 0)
+	defer func() {
+		procEnableWindow.Call(uintptr(mainHwnd), 1)
+		procSetForegroundWindow.Call(uintptr(mainHwnd))
+		conflictResolverPath = ""
+	}()
+
+	hinst, _, _ := procGetModuleHandleW.Call(0)
+	hwnd, _, err := procCreateWindowExW.Call(
+		0,
+		uintptr(unsafe.Pointer(u16("FirebirdToolboxConflictWindow"))),
+		uintptr(unsafe.Pointer(u16("Resolver conflito de registros - Firebird Toolbox"))),
+		WS_CAPTION|WS_SYSMENU|WS_VISIBLE,
+		90, 45, 1010, 800,
+		uintptr(mainHwnd), 0, hinst, 0,
+	)
+	if hwnd == 0 {
+		messageBox("Firebird Toolbox", "Não foi possível abrir o resolvedor de conflitos.\n\nDetalhes: "+fmt.Sprint(err), MB_OK|MB_ICONERROR)
+		return conflictResolutionCancel
+	}
+	conflictHwnd = syscall.Handle(hwnd)
+	if icon := cachedUIIcon("database", 32); icon != 0 {
+		procSendMessageW.Call(hwnd, WM_SETICON, ICON_BIG, uintptr(icon))
+	}
+	if icon := cachedUIIcon("database", 16); icon != 0 {
+		procSendMessageW.Call(hwnd, WM_SETICON, ICON_SMALL, uintptr(icon))
+	}
+
+	title := createConflictControl(0, "STATIC", "Conflito de chave: escolha qual registro deve permanecer", WS_CHILD|WS_VISIBLE, 22, 16, 930, 30, 0)
+	if titleFont != 0 {
+		procSendMessageW.Call(uintptr(title), WM_SETFONT, uintptr(titleFont), 1)
+	}
+	createConflictControl(0, "STATIC", "Tabela "+conflict.Relation+" | "+duplicateConflictKeyLabel(conflict), WS_CHILD|WS_VISIBLE, 24, 50, 940, 22, 0)
+
+	summary := createConflictControl(WS_EX_CLIENTEDGE, "EDIT", view.SummaryText, WS_CHILD|WS_VISIBLE|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY, 22, 80, 950, 112, 0)
+	procSendMessageW.Call(uintptr(summary), EM_SETSEL, 0, 0)
+	createConflictControl(0, "STATIC", "Registro 1", WS_CHILD|WS_VISIBLE, 22, 202, 200, 22, 0)
+	createConflictControl(0, "STATIC", "Registro 2", WS_CHILD|WS_VISIBLE, 506, 202, 200, 22, 0)
+	left := createConflictControl(WS_EX_CLIENTEDGE, "EDIT", view.Record1Text, WS_CHILD|WS_VISIBLE|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY, 22, 226, 466, 370, 0)
+	right := createConflictControl(WS_EX_CLIENTEDGE, "EDIT", view.Record2Text, WS_CHILD|WS_VISIBLE|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY, 506, 226, 466, 370, 0)
+	if monoFont != 0 {
+		procSendMessageW.Call(uintptr(left), WM_SETFONT, uintptr(monoFont), 1)
+		procSendMessageW.Call(uintptr(right), WM_SETFONT, uintptr(monoFont), 1)
+	}
+	procSendMessageW.Call(uintptr(left), EM_SETSEL, 0, 0)
+	procSendMessageW.Call(uintptr(right), EM_SETSEL, 0, 0)
+	createConflictControl(0, "STATIC", view.DetailsText, WS_CHILD|WS_VISIBLE, 22, 610, 950, 60, 0)
+	createConflictControl(0, "BUTTON", "Manter registro 1", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 22, 688, 170, 34, idConflictKeep1)
+	createConflictControl(0, "BUTTON", "Manter registro 2", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 202, 688, 170, 34, idConflictKeep2)
+	createConflictControl(0, "BUTTON", "Abrir comparação", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 602, 688, 170, 34, idConflictExport)
+	createConflictControl(0, "BUTTON", "Preservar e cancelar", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 782, 688, 190, 34, idConflictCancel)
+	createConflictControl(0, "STATIC", "Nenhuma opção altera o banco original. A escolha afeta somente a cópia de trabalho.", WS_CHILD|WS_VISIBLE, 22, 735, 950, 22, 0)
+
+	procShowWindow.Call(hwnd, SW_SHOW)
+	procUpdateWindow.Call(hwnd)
+	procSetForegroundWindow.Call(hwnd)
+	var m msg
+	for {
+		r, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
+		if int32(r) <= 0 {
+			break
+		}
+		procTranslateMessage.Call(uintptr(unsafe.Pointer(&m)))
+		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
+	}
+	return conflictResolverDecision
 }
 
 func openDestination() {
@@ -5501,6 +6484,20 @@ func main() {
 	}
 	if helpAtom, _, helpErr := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&helpClass))); helpAtom == 0 {
 		showStartupFailure(fmt.Sprintf("nao foi possivel registrar a janela de ajuda: %v", helpErr))
+		return
+	}
+
+	conflictClassName := u16("FirebirdToolboxConflictWindow")
+	conflictClass := wndClassEx{
+		cbSize:        uint32(unsafe.Sizeof(wndClassEx{})),
+		lpfnWndProc:   syscall.NewCallback(conflictWndProc),
+		hInstance:     syscall.Handle(hinst),
+		hCursor:       syscall.Handle(cursor),
+		hbrBackground: syscall.Handle(COLOR_WINDOW + 1),
+		lpszClassName: conflictClassName,
+	}
+	if conflictAtom, _, conflictErr := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&conflictClass))); conflictAtom == 0 {
+		showStartupFailure(fmt.Sprintf("nao foi possivel registrar o resolvedor de conflitos: %v", conflictErr))
 		return
 	}
 

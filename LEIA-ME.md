@@ -1,6 +1,6 @@
-# Firebird Toolbox v1.2.12 — Ajuda rápida
+# Firebird Toolbox v1.2.14 — Ajuda rápida
 
-Na v1.2.12, a distribuição oficial exige Microsoft Artifact Signing com timestamp e não publica EXE sem assinatura. O aplicativo também deixa de se autoelevar e passa a carregar os ícones incorporados diretamente da memória, sem gravá-los em `%TEMP%`.
+Na v1.2.14, o fluxo avançado ganhou uma etapa obrigatória de **pós-recuperação e saúde**. Depois do restore final, o Toolbox verifica acesso SQL, sweep, corrupção estrutural, transações em limbo, índices e constraints inativos, header e contagens essenciais. Somente uma recuperação completa que passa nos gates críticos recebe `APTO PARA PRODUÇÃO`. O resolvedor de conflitos da v1.2.13 e o hardening de distribuição da v1.2.12 permanecem.
 
 
 
@@ -46,11 +46,31 @@ Use `Corrigir banco (avançado)` quando:
 9. Gera o backup de recuperação.
 10. Faz restore de teste automático.
 11. Se o restore falhar por PRIMARY/UNIQUE duplicada, preserva o restore falho e refaz a restauração com `-inactive` para inspecionar todos os registros com os índices inativos.
-12. Compara as ocorrências da chave; duplicidades idênticas podem ser saneadas na cópia, enquanto diferenças/inconclusões exigem confirmação explícita e ficam preservadas em `CONFLITOS_DUPLICIDADE.txt`.
+12. Compara as ocorrências da chave; duplicidades idênticas podem ser saneadas na cópia, enquanto diferenças/inconclusões abrem o resolvedor lado a lado para escolher `REGISTRO 1`, `REGISTRO 2` ou preservar ambos e cancelar. A decisão e os dados ficam registrados em `CONFLITOS_DUPLICIDADE.txt` e no arquivo `COMPARACAO_CONFLITO_*.txt`.
 13. `-one_at_a_time` fica reservado a outras falhas de restore que possam produzir um banco parcial útil para inspeção.
 14. Se o restore de teste completo passar, pode restaurar o banco final.
-15. Salva `RELATORIO_RECUPERACAO.txt`.
+15. Executa os gates de pós-recuperação no banco final e compara o destino com o restore de referência.
+16. Salva `RELATORIO_RECUPERACAO.txt` e `RELATORIO_SAUDE_PERFORMANCE.txt`.
 
+
+
+## Pós-recuperação e saúde — v1.2.14
+
+Depois que o restore final termina, o modo avançado não libera o banco imediatamente. Ele executa uma etapa adicional com:
+
+- teste de acesso SQL ao banco restaurado;
+- `gfix -list` para confirmar ausência de transações em limbo;
+- sweep final;
+- `gfix -validate -full -no_update` (ou modo legado somente no banco restaurado quando a versão não suporta `-no_update`);
+- conferência de índices de usuário inativos;
+- conferência específica de `PRIMARY KEY` e `UNIQUE` inativas;
+- leitura do header por `gstat`, incluindo ODS, dialeto, page size, OIT/OAT/OST, next transaction e sweep interval;
+- comparação do total de tabelas, índices e constraints com o restore de teste;
+- contagem das relações diretamente envolvidas na recuperação, como a tabela de resgate ou uma tabela com duplicidade.
+
+Se qualquer gate crítico reprovar, o estado final passa a **NÃO APTO PARA PRODUÇÃO** e a interface exibe erro. Recuperações parciais que passam estruturalmente ficam como **ESTRUTURALMENTE SAUDÁVEIS; REVISÃO FUNCIONAL OBRIGATÓRIA**, sem liberação automática para produção.
+
+O arquivo `RELATORIO_SAUDE_PERFORMANCE.txt` é criado dentro da mesma pasta `RECOVERY_...`.
 
 ## Quando o backup ainda falha depois do mend
 
@@ -102,11 +122,11 @@ Quando o `gbak` informa `violation of PRIMARY or UNIQUE KEY constraint`, a v1.2.
 - preserva uma cópia desse banco antes de qualquer exclusão;
 - compara as ocorrências nas colunas compatíveis e grava `CONFLITOS_DUPLICIDADE.txt`;
 - se as linhas forem idênticas nas colunas comparáveis, mantém uma ocorrência na cópia e remove apenas as extras;
-- se houver campos diferentes ou BLOB/ARRAY que tornem a comparação inconclusiva, não escolhe silenciosamente: exige confirmação para manter a primeira ocorrência física e mantém todas as versões no banco de inspeção;
+- se houver campos diferentes, abre o resolvedor visual e destaca as diferenças; BLOBs/fotos são comparados por SHA-256 no Firebird 4.0/5.0 quando possível, e versões antigas continuam marcando esses campos como inconclusivos;
 - reconstrói todos os índices, valida, gera `*_SEM_DUPLICIDADES_XX.BAK` e repete o restore completo;
 - se o usuário autorizou descartar uma ocorrência diferente/inconclusiva, o resultado permanece **RECUPERAÇÃO PARCIAL**.
 
-Arquivos adicionais: `*_RESTORE_FALHO_XX.RED`, `*_CONFLITO_ORIGINAL_XX.RED`, `*_CONFLITO_SANEADO_XX.RED`, `*_SEM_DUPLICIDADES_XX.BAK` e `CONFLITOS_DUPLICIDADE.txt`.
+Arquivos adicionais: `*_RESTORE_FALHO_XX.RED`, `*_CONFLITO_ORIGINAL_XX.RED`, `*_CONFLITO_SANEADO_XX.RED`, `*_SEM_DUPLICIDADES_XX.BAK`, `CONFLITOS_DUPLICIDADE.txt` e `COMPARACAO_CONFLITO_<TABELA>_XX.txt`.
 
 ## Transações em limbo
 

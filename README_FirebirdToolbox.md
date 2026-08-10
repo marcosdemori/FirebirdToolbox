@@ -1,17 +1,50 @@
-# Firebird Toolbox v1.2.12
+# Firebird Toolbox v1.2.14
 
 > Para a visão geral do repositório, build e publicação no GitHub, consulte [README.md](README.md).
 
 
 Utilitário portátil para Windows (x64 e x86) para manutenção, recuperação e restauração de bancos Firebird **1.0, 1.5, 2.0, 2.1, 2.5, 3.0, 4.0 e 5.0**.
 
-A v1.2.12 mantém somente três rotinas na interface:
+A v1.2.14 mantém somente três rotinas na interface:
 
 1. `Corrigir banco`
 2. `Corrigir banco (avançado)`
 3. `Somente restaurar`
 
 
+
+
+
+## Pós-recuperação e liberação para produção — v1.2.14
+
+A partir da v1.2.14, um restore final bem-sucedido não é suficiente para o Toolbox declarar a recuperação encerrada. O modo avançado executa gates de saúde no banco restaurado:
+
+- acesso SQL;
+- sweep final;
+- validação estrutural final com `gfix`;
+- ausência de transações em limbo;
+- zero índices de usuário inativos;
+- zero `PRIMARY KEY`/`UNIQUE` inativas;
+- leitura do header e indicadores transacionais com `gstat`;
+- comparação de tabelas, índices e constraints com o restore de teste;
+- comparação da contagem das relações diretamente afetadas pelo resgate/conflito.
+
+O resultado detalhado fica em `RELATORIO_SAUDE_PERFORMANCE.txt`. Se um gate crítico falhar, a interface marca **NÃO APTO PARA PRODUÇÃO** e o banco não deve substituir a base em uso. Se a estrutura estiver saudável mas a recuperação tiver perda conhecida ou escolha manual entre registros, o resultado permanece **RECUPERAÇÃO PARCIAL / REVISÃO FUNCIONAL OBRIGATÓRIA**. Somente recuperação completa sem gates críticos recebe **APTO PARA PRODUÇÃO**.
+
+## Resolvedor de conflitos de registros — v1.2.13
+
+Quando um restore com índices inativos revela duas ocorrências diferentes para a mesma `PRIMARY KEY`/`UNIQUE`, o Toolbox não pede mais uma decisão cega por `Sim/Não`. A v1.2.13 abre uma janela própria de resolução com:
+
+- `REGISTRO 1` e `REGISTRO 2` lado a lado;
+- marcação `[DIFERENTE]` nos campos que não coincidem;
+- resumo da tabela, constraint e chave problemática;
+- comparação automática de BLOBs/fotos por SHA-256 no Firebird 4.0 e 5.0, quando a leitura é suportada;
+- botões `Manter registro 1`, `Manter registro 2`, `Abrir comparação` e `Preservar e cancelar`;
+- arquivo `COMPARACAO_CONFLITO_<TABELA>_XX.txt` preservado na pasta de recuperação;
+- preservação do banco original e do banco de inspeção com todas as ocorrências;
+- continuação automática do fluxo após uma escolha: remove somente as ocorrências extras na cópia de trabalho, reconstrói índices, valida, gera novo backup e repete o restore de teste.
+
+Se o usuário escolher qual ocorrência manter quando houver conteúdo realmente diferente, o resultado permanece classificado como **RECUPERAÇÃO PARCIAL**, com a decisão registrada em `RELATORIO_RECUPERACAO.txt` e `CONFLITOS_DUPLICIDADE.txt`. Se escolher `Preservar e cancelar`, nenhuma ocorrência é removida.
 
 ## Ajustes visuais da v1.2.5
 
@@ -71,7 +104,7 @@ Quando o restore falha com `violation of PRIMARY or UNIQUE KEY constraint`, o To
 5. preserva uma cópia completa desse banco de inspeção antes de qualquer remoção;
 6. conta as ocorrências da chave e compara as colunas que podem ser verificadas com segurança;
 7. duplicidades logicamente idênticas podem ser reduzidas automaticamente a uma ocorrência apenas na cópia de trabalho;
-8. se houver campos diferentes ou colunas não comparáveis automaticamente, como BLOB/ARRAY, todas as versões ficam preservadas no banco de inspeção e em `CONFLITOS_DUPLICIDADE.txt`, e o Toolbox exige confirmação explícita antes de manter a primeira ocorrência física;
+8. se houver campos diferentes, todas as versões ficam preservadas no banco de inspeção e o Toolbox abre o resolvedor lado a lado; BLOBs/fotos são comparados por SHA-256 no Firebird 4.0/5.0 quando possível, e campos ainda inconclusivos permanecem claramente identificados;
 9. depois do saneamento, todos os índices de usuário são reconstruídos, o banco é validado, é criado `*_SEM_DUPLICIDADES_XX.BAK` e o restore de teste completo é repetido.
 
 Se o usuário autorizar manter uma ocorrência quando houver diferenças ou comparação inconclusiva, o resultado permanece **RECUPERAÇÃO PARCIAL**. Duplicidades estruturalmente idênticas podem concluir como recuperação completa, mas ficam registradas para auditoria.
@@ -271,7 +304,7 @@ A porta pode ser detectada em `RemoteServicePort` do `firebird.conf`. O serviço
 A distribuição oficial é gerada pelo GitHub Actions e exige Microsoft Artifact Signing. Para um build local **somente de desenvolvimento**:
 
 ```powershell
-.\tools\build.ps1 -Version '1.2.12' -AllowUnsignedDev
+.\tools\build.ps1 -Version '1.2.14' -AllowUnsignedDev
 ```
 
 Os arquivos locais sem assinatura recebem `_UNSIGNED_DEV` no nome e não devem ser distribuídos.
@@ -280,7 +313,7 @@ Para um build local com PFX confiável:
 
 ```powershell
 .\tools\build.ps1 `
-  -Version '1.2.12' `
+  -Version '1.2.14' `
   -SigningPfx 'C:\Certificados\codigo.pfx' `
   -SigningPassword 'SENHA'
 ```

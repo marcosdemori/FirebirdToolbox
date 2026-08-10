@@ -2,9 +2,9 @@
 
 Utilitário portátil para Windows destinado à **manutenção, correção, recuperação e restauração de bancos Firebird 1.0 a 5.0**.
 
-**Versão atual:** 1.2.12
+**Versão atual:** 1.2.14
 
-A v1.2.12 endurece a distribuição contra falsos positivos e builds sem identidade: remove autoelevação automática, deixa de extrair ícones para `%TEMP%`, exige Microsoft Artifact Signing + timestamp em toda Release oficial e adiciona atestação de proveniência. Releases sem assinatura são bloqueadas.
+A v1.2.14 adiciona **gates automáticos de pós-recuperação**: depois do restore final, o Toolbox confere acesso SQL, sweep, validação estrutural, transações em limbo, índices/PRIMARY KEY/UNIQUE inativos, header transacional e contagens das relações envolvidas. Só uma recuperação completa que passa em todos os gates recebe o estado `APTO PARA PRODUÇÃO`. O resolvedor visual de conflitos da v1.2.13 permanece integralmente.
 
 **Projeto feito por Marcos De Mori Laiola**
 
@@ -23,6 +23,7 @@ A v1.2.12 endurece a distribuição contra falsos positivos e builds sem identid
 - tratamento de corrupção de índices, páginas e conflitos de chave;
 - tentativa de resgate de registros antes de excluir uma relação inteira;
 - restore de teste antes de considerar um backup recuperado como válido;
+- pós-recuperação com `RELATORIO_SAUDE_PERFORMANCE.txt` e gate explícito `APTO PARA PRODUÇÃO`;
 - executáveis Windows x64 e x86.
 
 > **Importante:** recuperação de banco corrompido nunca deve ser executada sobre o único arquivo disponível. Preserve cópias externas antes de iniciar qualquer procedimento.
@@ -31,7 +32,7 @@ A v1.2.12 endurece a distribuição contra falsos positivos e builds sem identid
 
 Os executáveis compilados devem ser disponibilizados na seção **Releases** deste repositório.
 
-Ao criar uma tag no formato `v1.2.12`, por exemplo, o workflow de release compila automaticamente:
+Ao criar uma tag no formato `v1.2.14`, por exemplo, o workflow de release compila automaticamente:
 
 - Windows x64;
 - Windows x86 / 32-bit;
@@ -71,7 +72,7 @@ Restaura um backup Firebird para o destino selecionado sem executar a etapa de c
 Para teste local sem assinatura, é necessário assumir explicitamente que o binário é apenas de desenvolvimento:
 
 ```powershell
-.\tools\build.ps1 -Version "1.2.12" -AllowUnsignedDev
+.\tools\build.ps1 -Version "1.2.14" -AllowUnsignedDev
 ```
 
 O arquivo recebe `_UNSIGNED_DEV` no nome. Para distribuição pública use a Release oficial assinada.
@@ -81,10 +82,10 @@ Para compilar somente x64:
 ```powershell
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"
-.\tools\prepare-resources.ps1 -Version "1.2.12"
+.\tools\prepare-resources.ps1 -Version "1.2.14"
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"
-go build -trimpath -buildvcs=false -ldflags="-H=windowsgui -X main.appVersion=1.2.12" -o FirebirdToolbox.exe .
+go build -trimpath -buildvcs=false -ldflags="-H=windowsgui -X main.appVersion=1.2.14" -o FirebirdToolbox.exe .
 ```
 
 ## Publicar no GitHub
