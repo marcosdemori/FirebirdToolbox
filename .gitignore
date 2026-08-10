@@ -61,3 +61,6 @@ Desktop.ini
 auto-cover.out
 coverage.out
 *.test
+
+# Recursos Windows gerados no build
+rsrc_windows_*.syso

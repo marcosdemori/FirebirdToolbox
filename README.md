@@ -2,9 +2,9 @@
 
 Utilitário portátil para Windows destinado à **manutenção, correção, recuperação e restauração de bancos Firebird 1.0 a 5.0**.
 
-**Versão atual:** 1.2.8  
+**Versão atual:** 1.2.10  
 
-Na v1.2.8, estados terminais de sucesso, recuperação parcial, decisão manual, cancelamento e erro fecham a barra de progresso em 100%, mantendo cor e resultado próprios para cada situação.
+A v1.2.10 mantém o hardening de distribuição Windows da v1.2.9 e corrige o CI/Release: a Ajuda integrada documenta explicitamente `gbak -inactive` no saneamento de chaves duplicadas, e os workflows usam Actions atuais baseados em Node 24.
 
 **Projeto feito por Marcos De Mori Laiola**
 
@@ -31,11 +31,12 @@ Na v1.2.8, estados terminais de sucesso, recuperação parcial, decisão manual,
 
 Os executáveis compilados devem ser disponibilizados na seção **Releases** deste repositório.
 
-Ao criar uma tag no formato `v1.2.8`, por exemplo, o workflow de release compila automaticamente:
+Ao criar uma tag no formato `v1.2.10`, por exemplo, o workflow de release compila automaticamente:
 
 - Windows x64;
 - Windows x86 / 32-bit;
-- arquivo SHA-256.
+- arquivo SHA-256;
+- status explícito da assinatura Authenticode.
 
 Os binários são anexados diretamente à GitHub Release e não ficam armazenados no histórico Git.
 
@@ -61,6 +62,7 @@ Restaura um backup Firebird para o destino selecionado sem executar a etapa de c
 
 - Windows;
 - Go 1.23 ou superior compatível;
+- acesso à internet na primeira execução para instalar `go-winres v0.3.3`;
 - Git, opcional para desenvolvimento.
 
 Execute:
@@ -76,7 +78,10 @@ Para compilar somente x64:
 ```powershell
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"
-go build -trimpath -ldflags="-H=windowsgui -s -w" -o FirebirdToolbox.exe .
+.\tools\prepare-resources.ps1 -Version "1.2.10"
+$env:GOOS = "windows"
+$env:GOARCH = "amd64"
+go build -trimpath -buildvcs=false -ldflags="-H=windowsgui -X main.appVersion=1.2.10" -o FirebirdToolbox.exe .
 ```
 
 ## Publicar no GitHub
@@ -88,7 +93,7 @@ Consulte [GITHUB_UPLOAD.md](GITHUB_UPLOAD.md) ou execute `PUBLICAR_GITHUB.bat` p
 O projeto possui dois workflows:
 
 - **CI:** valida `gofmt`, executa `go vet`, testes e builds x64/x86 em push/PR para `main`;
-- **Release:** em tags `v*.*.*`, compila x64/x86, calcula SHA-256 e cria a GitHub Release automaticamente.
+- **Release:** em tags `v*.*.*`, gera recursos nativos do Windows, compila x64/x86, assina com Authenticode quando o certificado estiver configurado, calcula SHA-256 após a assinatura e cria a GitHub Release automaticamente.
 
 A CI não envia artifacts intermediários, evitando consumo desnecessário de Actions Storage.
 
@@ -100,7 +105,9 @@ A CI não envia artifacts intermediários, evitando consumo desnecessário de Ac
 ├── assets/                 # ícones incorporados
 ├── docs/                   # documentação complementar
 ├── scripts/                # BATs originais de referência
+├── winres/                 # ícone, manifesto e VersionInfo do executável
 ├── tools/build.ps1         # build local x64/x86
+├── tools/sign-windows.ps1  # assinatura Authenticode opcional
 ├── PUBLICAR_GITHUB.bat     # publicacao guiada opcional
 ├── main.go                 # aplicação Win32
 ├── main_test.go            # regressões
@@ -120,7 +127,7 @@ O conteúdo exibido pelo botão **Ajuda** do aplicativo é mantido em [LEIA-ME.m
 
 ## Privacidade e segurança
 
-Não publique bancos reais, backups, senhas SYSDBA ou relatórios contendo dados de clientes. Consulte [SECURITY.md](SECURITY.md).
+Não publique bancos reais, backups, senhas SYSDBA ou relatórios contendo dados de clientes. Consulte [SECURITY.md](SECURITY.md) e [docs/DISTRIBUICAO_WINDOWS.md](docs/DISTRIBUICAO_WINDOWS.md).
 
 ## Licença
 

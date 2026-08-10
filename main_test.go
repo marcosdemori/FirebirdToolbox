@@ -265,7 +265,7 @@ func TestMergeRecoveryStatsKeepsWorstCounts(t *testing.T) {
 }
 
 func TestProjectCreditAndVersion(t *testing.T) {
-	if appVersion != "1.2.8" {
+	if appVersion != "1.2.10" {
 		t.Fatalf("unexpected app version: %s", appVersion)
 	}
 	if appCredit != "Projeto feito por Marcos De Mori Laiola" {
@@ -585,6 +585,26 @@ func TestHelpTextCoversDuplicateKeyRecovery(t *testing.T) {
 	for _, want := range []string{"PRIMARY KEY", "UNIQUE", "-inactive", "CONFLITOS_DUPLICIDADE.txt", "primeira ocorrência"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("help text missing duplicate-recovery concept %q", want)
+		}
+	}
+}
+
+func TestWindowsDistributionMetadataConfig(t *testing.T) {
+	data, err := os.ReadFile("winres/winres.json")
+	if err != nil {
+		t.Fatalf("winres metadata missing: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		`"CompanyName": "Marcos De Mori Laiola"`,
+		`"ProductName": "Firebird Toolbox"`,
+		`"FileVersion": "1.2.10.0"`,
+		`"ProductVersion": "1.2.10"`,
+		`"execution-level": "as invoker"`,
+		`"use-common-controls-v6": true`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("winres metadata missing %q", want)
 		}
 	}
 }

@@ -48,7 +48,7 @@ git diff --cached --quiet
 if not errorlevel 1 (
     echo Nao ha alteracoes novas para commit.
 ) else (
-    git commit -m "chore(repo): preparar Firebird Toolbox v1.2.8 para GitHub" || goto :erro
+    git commit -m "chore(repo): preparar Firebird Toolbox v1.2.10 para GitHub" || goto :erro
 )
 
 echo.
@@ -71,13 +71,13 @@ echo Enviando branch main...
 git push -u origin main || goto :erro
 
 echo.
-set /p TAG=Criar e enviar a tag v1.2.8 para gerar a Release automatica? [S/N]: 
+set /p TAG=Criar e enviar a tag v1.2.10 para gerar a Release automatica? [S/N]: 
 if /I "%TAG%"=="S" (
-    git rev-parse v1.2.8 >nul 2>nul
+    git rev-parse v1.2.10 >nul 2>nul
     if errorlevel 1 (
-        git tag -a v1.2.8 -m "Firebird Toolbox v1.2.8" || goto :erro
+        git tag -a v1.2.10 -m "Firebird Toolbox v1.2.10" || goto :erro
     )
-    git push origin v1.2.8 || goto :erro
+    git push origin v1.2.10 || goto :erro
     echo.
     echo Tag enviada. O GitHub Actions deve iniciar o workflow Release.
 )

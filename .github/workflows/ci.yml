@@ -12,14 +12,14 @@ permissions:
 jobs:
   validate-windows:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.23.x'
           cache: true
@@ -33,6 +33,10 @@ jobs:
             throw "Arquivos fora do padrao gofmt."
           }
 
+      - name: Generate Windows resources
+        shell: pwsh
+        run: ./tools/prepare-resources.ps1 -Version '1.2.10'
+
       - name: Vet Windows x64
         shell: pwsh
         run: |
@@ -44,10 +48,13 @@ jobs:
         shell: pwsh
         run: go test ./...
 
-      - name: Build Windows x64
+      - name: Build and verify Windows x64
         shell: pwsh
         run: |
-          go build -trimpath -ldflags="-H=windowsgui -s -w" -o FirebirdToolbox_ci_x64.exe .
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'amd64'
+          go build -trimpath -buildvcs=false -ldflags="-H=windowsgui -X main.appVersion=1.2.10" -o FirebirdToolbox_ci_x64.exe .
+          ./tools/verify-windows-build.ps1 -Path ./FirebirdToolbox_ci_x64.exe -Version '1.2.10'
           Remove-Item FirebirdToolbox_ci_x64.exe -Force
 
       - name: Compile Windows x86 tests
@@ -58,10 +65,11 @@ jobs:
           go test -c -o FirebirdToolbox_tests_x86.exe .
           Remove-Item FirebirdToolbox_tests_x86.exe -Force
 
-      - name: Build Windows x86
+      - name: Build and verify Windows x86
         shell: pwsh
         run: |
           $env:GOOS = 'windows'
           $env:GOARCH = '386'
-          go build -trimpath -ldflags="-H=windowsgui -s -w" -o FirebirdToolbox_x86.exe .
-          Remove-Item FirebirdToolbox_x86.exe -Force
+          go build -trimpath -buildvcs=false -ldflags="-H=windowsgui -X main.appVersion=1.2.10" -o FirebirdToolbox_ci_x86.exe .
+          ./tools/verify-windows-build.ps1 -Path ./FirebirdToolbox_ci_x86.exe -Version '1.2.10'
+          Remove-Item FirebirdToolbox_ci_x86.exe -Force

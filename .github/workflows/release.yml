@@ -11,17 +11,24 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.23.x'
           cache: true
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Validate
         shell: pwsh
@@ -36,25 +43,71 @@ jobs:
           go vet ./...
           go test ./...
 
+      - name: Generate Windows resources
+        shell: pwsh
+        run: ./tools/prepare-resources.ps1 -Version '${{ steps.version.outputs.version }}'
+
       - name: Build release x64 and x86
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          $version = "${{ github.ref_name }}"
+          $version = '${{ steps.version.outputs.version }}'
+          $tag = '${{ github.ref_name }}'
+          $ld = "-H=windowsgui -X main.appVersion=$version"
 
           $env:GOOS = 'windows'
           $env:GOARCH = 'amd64'
-          go build -trimpath -ldflags="-H=windowsgui -s -w -X main.appVersion=$($version.TrimStart('v'))" -o "dist/FirebirdToolbox_$version.exe" .
+          go build -trimpath -buildvcs=false -ldflags=$ld -o "dist/FirebirdToolbox_$tag.exe" .
 
           $env:GOARCH = '386'
-          go build -trimpath -ldflags="-H=windowsgui -s -w -X main.appVersion=$($version.TrimStart('v'))" -o "dist/FirebirdToolbox_${version}_x86.exe" .
+          go build -trimpath -buildvcs=false -ldflags=$ld -o "dist/FirebirdToolbox_${tag}_x86.exe" .
 
-          $bundle = "dist/bundle"
+          ./tools/verify-windows-build.ps1 -Path "dist/FirebirdToolbox_$tag.exe" -Version $version
+          ./tools/verify-windows-build.ps1 -Path "dist/FirebirdToolbox_${tag}_x86.exe" -Version $version
+
+      - name: Sign Windows executables when certificate is configured
+        id: signing
+        shell: pwsh
+        env:
+          WINDOWS_SIGN_CERT_BASE64: ${{ secrets.WINDOWS_SIGN_CERT_BASE64 }}
+          WINDOWS_SIGN_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGN_CERT_PASSWORD }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $version = '${{ steps.version.outputs.version }}'
+          $files = @("dist/FirebirdToolbox_$tag.exe", "dist/FirebirdToolbox_${tag}_x86.exe")
+
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGN_CERT_BASE64) -or [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGN_CERT_PASSWORD)) {
+            "signed=false" >> $env:GITHUB_OUTPUT
+            "UNSIGNED - configure WINDOWS_SIGN_CERT_BASE64 and WINDOWS_SIGN_CERT_PASSWORD to enable Authenticode." | Set-Content -Encoding ASCII dist/SIGNATURE_STATUS.txt
+            Write-Warning "Release sera publicada sem assinatura Authenticode."
+            exit 0
+          }
+
+          $pfx = Join-Path $env:RUNNER_TEMP 'firebirdtoolbox-signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_SIGN_CERT_BASE64))
+          try {
+            ./tools/sign-windows.ps1 -Path $files -PfxPath $pfx -Password $env:WINDOWS_SIGN_CERT_PASSWORD
+            foreach ($file in $files) {
+              ./tools/verify-windows-build.ps1 -Path $file -Version $version -RequireSignature
+            }
+            "SIGNED - Authenticode signature verified by signtool and PowerShell." | Set-Content -Encoding ASCII dist/SIGNATURE_STATUS.txt
+            "signed=true" >> $env:GITHUB_OUTPUT
+          }
+          finally {
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Package and hash release
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $bundle = 'dist/bundle'
           New-Item -ItemType Directory -Path $bundle -Force | Out-Null
-          Copy-Item "dist/FirebirdToolbox_$version.exe" $bundle
-          Copy-Item "dist/FirebirdToolbox_${version}_x86.exe" $bundle
-          Copy-Item README.md, CHANGELOG.md, LEIA-ME.md, LICENSE $bundle
-          Compress-Archive -Path "$bundle/*" -DestinationPath "dist/FirebirdToolbox_${version}_completo.zip" -Force
+          Copy-Item "dist/FirebirdToolbox_$tag.exe" $bundle
+          Copy-Item "dist/FirebirdToolbox_${tag}_x86.exe" $bundle
+          Copy-Item "dist/SIGNATURE_STATUS.txt" $bundle
+          Copy-Item README.md, CHANGELOG.md, LEIA-ME.md, LICENSE, SECURITY.md $bundle
+          Compress-Archive -Path "$bundle/*" -DestinationPath "dist/FirebirdToolbox_${tag}_completo.zip" -Force
           Remove-Item $bundle -Recurse -Force
 
           Get-ChildItem dist -File |
@@ -63,18 +116,19 @@ jobs:
             ForEach-Object {
               $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
               "$hash  $($_.Name)"
-            } | Set-Content -Encoding ASCII "dist/FirebirdToolbox_${version}_SHA256.txt"
+            } | Set-Content -Encoding ASCII "dist/FirebirdToolbox_${tag}_SHA256.txt"
 
       - name: Create GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "${{ github.ref_name }}"
+          $tag = '${{ github.ref_name }}'
           gh release create $tag `
             "dist/FirebirdToolbox_$tag.exe" `
             "dist/FirebirdToolbox_${tag}_x86.exe" `
             "dist/FirebirdToolbox_${tag}_completo.zip" `
             "dist/FirebirdToolbox_${tag}_SHA256.txt" `
+            "dist/SIGNATURE_STATUS.txt" `
             --title "Firebird Toolbox $tag" `
             --generate-notes

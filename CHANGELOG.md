@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.10 - 2026-08-10
+
+- Corrige a falha do GitHub Actions em `TestHelpTextCoversDuplicateKeyRecovery`: a Ajuda integrada passa a citar explicitamente `gbak -inactive` no fluxo de recuperação de chaves `PRIMARY KEY`/`UNIQUE` duplicadas.
+- Atualiza os workflows para `actions/checkout@v7` e `actions/setup-go@v7`, eliminando a dependência dos runtimes Node 20 usados pelas majors antigas.
+- Mantém a lógica de recuperação Firebird da v1.2.9 sem alterações de regra de negócio.
+
+## 1.2.9 - 2026-08-10
+
+- Endurece a distribuição Windows após detecção heurística do Microsoft Defender em um build sem assinatura.
+- Adiciona recursos nativos de Windows com ícone, manifesto e VersionInfo: produto, empresa/desenvolvedor, descrição, versão, copyright e nome interno.
+- O manifesto passa a declarar execução como usuário atual, Windows 10 como base e Common Controls v6.
+- Remove `-s -w` dos builds de distribuição para evitar binários excessivamente stripped e preservar mais metadados de diagnóstico.
+- Adiciona `tools/prepare-resources.ps1`, `tools/verify-windows-build.ps1` e `tools/sign-windows.ps1`.
+- CI valida os metadados dos executáveis x64/x86.
+- Release aceita assinatura Authenticode opcional por certificado PFX armazenado nos secrets `WINDOWS_SIGN_CERT_BASE64` e `WINDOWS_SIGN_CERT_PASSWORD`; quando não configurado, publica explicitamente `SIGNATURE_STATUS.txt` como UNSIGNED.
+- SHA-256 é calculado somente depois da etapa de assinatura.
+- Nenhuma regra de manutenção/recuperação Firebird foi alterada.
+
 ## 1.2.8 - 2026-08-10
 
 - Corrige a barra de progresso que podia permanecer visualmente incompleta ao terminar uma recuperação parcial, conflito pendente ou erro.

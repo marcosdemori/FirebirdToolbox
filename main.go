@@ -28,11 +28,11 @@ import (
 	"unsafe"
 )
 
-var appVersion = "1.2.8"
+var appVersion = "1.2.10"
 var appCredit = "Projeto feito por Marcos De Mori Laiola"
 
 // Os BATs originais continuam incorporados como referencia/documentacao da logica
-// que originou o utilitario. A v1.2.8 executa gfix/gbak diretamente para manter
+// que originou o utilitario. A v1.2.10 executa gfix/gbak diretamente para manter
 // todo o log dentro da interface e permitir combinar versoes de origem/destino.
 //
 //go:embed scripts/*.bat LEIA-ME.md assets/*.ico
@@ -4989,8 +4989,8 @@ Corrigir banco (avançado)
 - Se a falha parecer estar em índice, tenta primeiro preservar todos os dados desativando apenas índices de usuário não ligados a constraints na cópia de trabalho.
 - Se uma relação específica continuar impedindo o backup, usa -skip_data apenas como base intermediária e tenta recolocar os registros legíveis no banco limpo.
 - A recuperação dos registros começa com leitura NATURAL, evitando índices corrompidos. Se necessário e houver chave primária numérica simples, o Toolbox divide a faixa da chave até isolar registros que realmente não podem ser lidos.
-- Se o restore falhar ao ativar uma PRIMARY KEY/UNIQUE por chave duplicada, o Toolbox NÃO usa -one_at_a_time: refaz a restauração com todos os índices inativos, preserva uma cópia para auditoria, identifica a chave problemática e compara as ocorrências.
-- Duplicidades logicamente idênticas podem ser saneadas automaticamente na cópia de trabalho, mantendo uma ocorrência. Se houver campos diferentes ou comparação inconclusiva, o Toolbox exige confirmação explícita antes de manter uma ocorrência e preserva todas as versões no banco/relatório de conflitos.
+- Se o restore falhar ao ativar uma PRIMARY KEY/UNIQUE por chave duplicada, o Toolbox NÃO usa -one_at_a_time: refaz a restauração com gbak -inactive (todos os índices inativos), preserva uma cópia para auditoria, identifica a chave problemática e compara as ocorrências.
+- Duplicidades logicamente idênticas podem ser saneadas automaticamente na cópia de trabalho, mantendo a primeira ocorrência física. Se houver campos diferentes ou comparação inconclusiva, o Toolbox exige confirmação explícita antes de manter a primeira ocorrência e preserva todas as versões no banco/relatório de conflitos.
 - Depois do saneamento, todos os índices são reconstruídos, um novo backup é criado e o restore de teste completo é repetido.
 
 Somente restaurar
@@ -5057,7 +5057,7 @@ Dentro da pasta RECOVERY_... podem ser criados:
 
 Falha do restore por PRIMARY/UNIQUE duplicada
 - O Toolbox extrai automaticamente tabela, constraint e chave problemática do gbak.
-- Em vez de insistir em -one_at_a_time, refaz o restore com índices inativos para manter todos os registros disponíveis.
+- Em vez de insistir em -one_at_a_time, refaz o restore com gbak -inactive para manter todos os registros disponíveis.
 - Se as ocorrências forem diferentes, nenhuma é descartada silenciosamente: o banco original do conflito e CONFLITOS_DUPLICIDADE.txt ficam preservados e a continuação exige confirmação.
 
 Falha do gbak em uma tabela

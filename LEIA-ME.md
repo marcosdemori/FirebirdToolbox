@@ -1,6 +1,6 @@
-# Firebird Toolbox v1.2.8 — Ajuda rápida
+# Firebird Toolbox v1.2.10 — Ajuda rápida
 
-Na v1.2.8, a barra de progresso sempre encerra visualmente em 100% quando a rotina termina. A cor e o campo `Resultado` indicam se o término foi completo, parcial, interrompido ou com erro.
+Na v1.2.10, os executáveis de distribuição passam a incluir metadados nativos do Windows (produto, desenvolvedor, versão, descrição, ícone e manifesto). O pipeline do GitHub também pode aplicar assinatura Authenticode quando um certificado de distribuição estiver configurado.
 
 
 
@@ -13,7 +13,7 @@ O botão Ajuda abre uma janela interna com guia rápido, descrição das rotinas
 
 Na v1.2.5, os rótulos de arquivos e instalações Firebird foram ampliados. A área inferior também foi reorganizada: `Etapa atual`, `Progresso` e `Resultado` aparecem em linhas separadas para que mensagens de recuperação e o resumo final não sejam cortados.
 
-Na v1.2.8, o texto de ajuda do campo `Pular tabelas (regex)` foi reposicionado e ampliado para exibir integralmente `Regex opcional do gbak -skip_data (FB 3.0+)`, sem cortar o rótulo e sem aumentar a janela.
+As correções visuais e de progresso das versões anteriores continuam preservadas.
 
 ## Rotinas
 
