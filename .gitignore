@@ -1,0 +1,63 @@
+# Firebird Toolbox - arquivos que nao devem ser versionados
+
+# Builds e pacotes de release
+/dist/
+/build/
+*.exe
+*.zip
+*.patch
+*_SHA256.txt
+*_validacao.txt
+*_commit.txt
+
+# Bancos Firebird e backups
+*.fdb
+*.FDB
+*.gdb
+*.GDB
+*.red
+*.RED
+*.bak
+*.BAK
+*.fbk
+*.FBK
+*.nbk
+*.NBK
+
+# Saidas de recuperacao
+RECOVERY_*/
+RECOVERY*/
+LOG_TECNICO_RECUPERACAO*.txt
+RELATORIO_RECUPERACAO*.txt
+CONFLITOS_DUPLICIDADE*.txt
+*_WORK.RED
+*_RESTORE_TEST.RED
+*_SALVAGE_*.FDB
+*_SALVAGE_*.RED
+
+# Temporarios e logs locais
+*.tmp
+*.temp
+*.log
+*.out
+
+# Segredos locais
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.p12
+
+# IDE / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Cobertura / testes
+auto-cover.out
+coverage.out
+*.test

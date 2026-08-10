@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: true
+
+      - name: Validate
+        shell: pwsh
+        run: |
+          $bad = gofmt -l .
+          if ($bad) {
+            $bad
+            throw "Arquivos fora do padrao gofmt."
+          }
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'amd64'
+          go vet ./...
+          go test ./...
+
+      - name: Build release x64 and x86
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          $version = "${{ github.ref_name }}"
+
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'amd64'
+          go build -trimpath -ldflags="-H=windowsgui -s -w -X main.appVersion=$($version.TrimStart('v'))" -o "dist/FirebirdToolbox_$version.exe" .
+
+          $env:GOARCH = '386'
+          go build -trimpath -ldflags="-H=windowsgui -s -w -X main.appVersion=$($version.TrimStart('v'))" -o "dist/FirebirdToolbox_${version}_x86.exe" .
+
+          $bundle = "dist/bundle"
+          New-Item -ItemType Directory -Path $bundle -Force | Out-Null
+          Copy-Item "dist/FirebirdToolbox_$version.exe" $bundle
+          Copy-Item "dist/FirebirdToolbox_${version}_x86.exe" $bundle
+          Copy-Item README.md, CHANGELOG.md, LEIA-ME.md, LICENSE $bundle
+          Compress-Archive -Path "$bundle/*" -DestinationPath "dist/FirebirdToolbox_${version}_completo.zip" -Force
+          Remove-Item $bundle -Recurse -Force
+
+          Get-ChildItem dist -File |
+            Where-Object { $_.Extension -in '.exe', '.zip' } |
+            Sort-Object Name |
+            ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $($_.Name)"
+            } | Set-Content -Encoding ASCII "dist/FirebirdToolbox_${version}_SHA256.txt"
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release create $tag `
+            "dist/FirebirdToolbox_$tag.exe" `
+            "dist/FirebirdToolbox_${tag}_x86.exe" `
+            "dist/FirebirdToolbox_${tag}_completo.zip" `
+            "dist/FirebirdToolbox_${tag}_SHA256.txt" `
+            --title "Firebird Toolbox $tag" `
+            --generate-notes

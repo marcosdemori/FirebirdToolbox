@@ -1,0 +1,5541 @@
+//go:build windows
+
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"embed"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+	"unicode/utf16"
+	"unicode/utf8"
+	"unsafe"
+)
+
+var appVersion = "1.2.8"
+var appCredit = "Projeto feito por Marcos De Mori Laiola"
+
+// Os BATs originais continuam incorporados como referencia/documentacao da logica
+// que originou o utilitario. A v1.2.8 executa gfix/gbak diretamente para manter
+// todo o log dentro da interface e permitir combinar versoes de origem/destino.
+//
+//go:embed scripts/*.bat LEIA-ME.md assets/*.ico
+var embeddedFiles embed.FS
+
+const (
+	WM_CREATE         = 0x0001
+	WM_DESTROY        = 0x0002
+	WM_CLOSE          = 0x0010
+	WM_DRAWITEM       = 0x002B
+	WM_COMMAND        = 0x0111
+	WM_SETFONT        = 0x0030
+	WM_CTLCOLORSTATIC = 0x0138
+	WM_SETICON        = 0x0080
+
+	WS_CAPTION     = 0x00C00000
+	WS_SYSMENU     = 0x00080000
+	WS_MINIMIZEBOX = 0x00020000
+	WS_VISIBLE     = 0x10000000
+	WS_CHILD       = 0x40000000
+	WS_TABSTOP     = 0x00010000
+	WS_VSCROLL     = 0x00200000
+	WS_BORDER      = 0x00800000
+
+	WS_EX_CLIENTEDGE = 0x00000200
+
+	ES_AUTOHSCROLL = 0x0080
+	ES_PASSWORD    = 0x0020
+	ES_READONLY    = 0x0800
+	ES_MULTILINE   = 0x0004
+	ES_AUTOVSCROLL = 0x0040
+
+	CBS_DROPDOWNLIST = 0x0003
+	CBS_HASSTRINGS   = 0x0200
+
+	CB_ADDSTRING  = 0x0143
+	CB_SETCURSEL  = 0x014E
+	CB_GETCURSEL  = 0x0147
+	CBN_SELCHANGE = 1
+
+	BN_CLICKED = 0
+
+	EM_SETSEL          = 0x00B1
+	EM_REPLACESEL      = 0x00C2
+	EM_SCROLLCARET     = 0x00B7
+	EM_SETPASSWORDCHAR = 0x00CC
+
+	SW_HIDE       = 0
+	SW_SHOW       = 5
+	SW_SHOWNORMAL = 1
+
+	MB_OK           = 0x00000000
+	MB_ICONERROR    = 0x00000010
+	MB_ICONQUESTION = 0x00000020
+	MB_ICONWARNING  = 0x00000030
+	MB_ICONINFO     = 0x00000040
+	MB_YESNO        = 0x00000004
+	IDYES           = 6
+
+	OFN_OVERWRITEPROMPT = 0x00000002
+	OFN_HIDEREADONLY    = 0x00000004
+	OFN_NOCHANGEDIR     = 0x00000008
+	OFN_PATHMUSTEXIST   = 0x00000800
+	OFN_FILEMUSTEXIST   = 0x00001000
+	OFN_EXPLORER        = 0x00080000
+
+	DEFAULT_GUI_FONT = 17
+	COLOR_WINDOW     = 5
+
+	IDC_ARROW = 32512
+
+	CREATE_NO_WINDOW = 0x08000000
+
+	BS_GROUPBOX  = 0x00000007
+	BS_OWNERDRAW = 0x0000000B
+	SS_ICON      = 0x00000003
+	STM_SETICON  = 0x0170
+
+	IMAGE_ICON       = 1
+	LR_LOADFROMFILE  = 0x00000010
+	ILC_MASK         = 0x00000001
+	ILC_COLOR32      = 0x00000020
+	BCM_SETIMAGELIST = 0x1602
+	BUTTON_ICON_LEFT = 0
+	ICON_SMALL       = 0
+	ICON_BIG         = 1
+
+	PBS_SMOOTH     = 0x00000001
+	PBM_SETPOS     = 0x0402
+	PBM_SETRANGE32 = 0x0406
+	PBM_SETSTATE   = 0x0410
+	PBST_NORMAL    = 0x0001
+	PBST_ERROR     = 0x0002
+	PBST_PAUSED    = 0x0003
+
+	BIF_RETURNONLYFSDIRS = 0x00000001
+	BIF_NEWDIALOGSTYLE   = 0x00000040
+
+	CF_UNICODETEXT = 13
+	GMEM_MOVEABLE  = 0x0002
+
+	FW_NORMAL   = 400
+	FW_SEMIBOLD = 600
+
+	ODS_SELECTED = 0x0001
+	ODS_DISABLED = 0x0004
+	ODS_FOCUS    = 0x0010
+
+	DT_CENTER       = 0x00000001
+	DT_VCENTER      = 0x00000004
+	DT_SINGLELINE   = 0x00000020
+	DT_END_ELLIPSIS = 0x00008000
+	TRANSPARENT     = 1
+	DI_NORMAL       = 0x0003
+)
+
+const (
+	idRoutine        = 1001
+	idSourceVersion  = 1002
+	idRestoreVersion = 1003
+	idSource         = 1004
+	idSourceBtn      = 1005
+	idDest           = 1006
+	idDestBtn        = 1007
+	idBackupDir      = 1008
+	idBackupDirBtn   = 1009
+	idFbSource       = 1010
+	idFbSourceBtn    = 1011
+	idFbTarget       = 1012
+	idFbTargetBtn    = 1013
+	idService        = 1014
+	idSourcePort     = 1015
+	idTargetPort     = 1016
+	idUser           = 1017
+	idPassword       = 1018
+	idPasswordToggle = 1019
+	idExecute        = 1020
+	idStop           = 1021
+	idOpenDest       = 1022
+	idHelp           = 1023
+	idClearLog       = 1024
+	idCopyLog        = 1025
+	idLog            = 1026
+	idStatus         = 1027
+	idDescription    = 1028
+	idDetailedLog    = 1029
+	idCopyPath       = 1030
+	idProgress       = 1031
+	idProgressText   = 1032
+	idResult         = 1033
+	idSkipData       = 1034
+
+	idHelpCopy  = 4101
+	idHelpClose = 4102
+
+	idHeaderTitle     = 3100
+	idSectionRoutine  = 3101
+	idSectionFiles    = 3102
+	idSectionFirebird = 3103
+	idSectionExecute  = 3104
+	idSectionLog      = 3105
+)
+
+const (
+	lblSource     = 2001
+	lblDest       = 2002
+	lblBackup     = 2003
+	lblFbSource   = 2004
+	lblFbTarget   = 2005
+	lblService    = 2006
+	lblSourcePort = 2007
+	lblTargetPort = 2008
+	lblSourceVer  = 2009
+	lblRestoreVer = 2010
+	lblSkipData   = 2011
+)
+
+// Medidas centrais da interface. Mantê-las nomeadas evita regressões de
+// truncamento em rótulos e no texto de andamento.
+const (
+	uiFilesLabelWidth    int32 = 150
+	uiFilesFieldX        int32 = 182
+	uiFirebirdLabelWidth int32 = 160
+	uiFirebirdFieldX     int32 = 192
+	uiProgressTextWidth  int32 = 780
+	uiProgressBarWidth   int32 = 780
+	uiSkipEditX          int32 = 190
+	uiSkipEditWidth      int32 = 382
+	uiSkipHintX          int32 = 584
+	uiSkipHintWidth      int32 = 300
+	uiLogEditHeight      int32 = 116
+)
+
+type routineKind int
+
+const (
+	routineRepair routineKind = iota
+	routineRepairAdvanced
+	routineRestore
+)
+
+type routineDef struct {
+	Name        string
+	Kind        routineKind
+	Description string
+}
+
+var routines = []routineDef{
+	{"Corrigir banco", routineRepair, "Valida, executa sweep, gera backup e, se escolhido, restaura em outra versao."},
+	{"Corrigir banco (avançado)", routineRepairAdvanced, "Recuperação segura em cópia: diagnóstico profundo, mend opcional, backup de resgate, teste de restore e relatório."},
+	{"Somente restaurar", routineRestore, "Restaura um arquivo BAK/FBK/GBK diretamente na versao escolhida."},
+}
+
+func routineNames(items []routineDef) []string {
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		names = append(names, item.Name)
+	}
+	return names
+}
+
+var versions = []string{"1.0", "1.5", "2.0", "2.1", "2.5", "3.0", "4.0", "5.0"}
+var restoreVersions = []string{"Nao restaurar", "1.0", "1.5", "2.0", "2.1", "2.5", "3.0", "4.0", "5.0"}
+
+type fbDefaults struct {
+	Root    string
+	Service string
+	Port    string
+}
+
+var defaults = map[string]fbDefaults{
+	"1.0": {`C:\Program Files\Firebird\Firebird_1_0`, "Autom\u00e1tico", "3050"},
+	"1.5": {`C:\Program Files\Firebird\Firebird_1_5`, "Autom\u00e1tico", "3050"},
+	"2.0": {`C:\Program Files\Firebird\Firebird_2_0`, "Autom\u00e1tico", "3050"},
+	"2.1": {`C:\Program Files\Firebird\Firebird_2_1`, "Autom\u00e1tico", "3050"},
+	"2.5": {`C:\Program Files\Firebird\Firebird_2_5`, "Autom\u00e1tico", "3050"},
+	"3.0": {`C:\Program Files\Firebird\Firebird_3_0`, "Autom\u00e1tico", "3053"},
+	"4.0": {`C:\Program Files\Firebird\Firebird_4_0`, "Autom\u00e1tico", "3054"},
+	"5.0": {`C:\Program Files\Firebird\Firebird_5_0`, "Autom\u00e1tico", "3055"},
+}
+
+type wndClassEx struct {
+	cbSize        uint32
+	style         uint32
+	lpfnWndProc   uintptr
+	cbClsExtra    int32
+	cbWndExtra    int32
+	hInstance     syscall.Handle
+	hIcon         syscall.Handle
+	hCursor       syscall.Handle
+	hbrBackground syscall.Handle
+	lpszMenuName  *uint16
+	lpszClassName *uint16
+	hIconSm       syscall.Handle
+}
+
+type point struct{ x, y int32 }
+
+type msg struct {
+	hwnd    syscall.Handle
+	message uint32
+	wParam  uintptr
+	lParam  uintptr
+	time    uint32
+	pt      point
+}
+
+type openFileName struct {
+	lStructSize       uint32
+	hwndOwner         syscall.Handle
+	hInstance         syscall.Handle
+	lpstrFilter       *uint16
+	lpstrCustomFilter *uint16
+	nMaxCustFilter    uint32
+	nFilterIndex      uint32
+	lpstrFile         *uint16
+	nMaxFile          uint32
+	lpstrFileTitle    *uint16
+	nMaxFileTitle     uint32
+	lpstrInitialDir   *uint16
+	lpstrTitle        *uint16
+	flags             uint32
+	nFileOffset       uint16
+	nFileExtension    uint16
+	lpstrDefExt       *uint16
+	lCustData         uintptr
+	lpfnHook          uintptr
+	lpTemplateName    *uint16
+	pvReserved        unsafe.Pointer
+	dwReserved        uint32
+	flagsEx           uint32
+}
+
+type browseInfo struct {
+	hwndOwner      syscall.Handle
+	pidlRoot       uintptr
+	pszDisplayName *uint16
+	lpszTitle      *uint16
+	ulFlags        uint32
+	lpfn           uintptr
+	lParam         uintptr
+	iImage         int32
+}
+
+type rect struct {
+	left   int32
+	top    int32
+	right  int32
+	bottom int32
+}
+
+type buttonImageList struct {
+	himl   uintptr
+	margin rect
+	uAlign uint32
+}
+
+type drawItemStruct struct {
+	CtlType    uint32
+	CtlID      uint32
+	ItemID     uint32
+	ItemAction uint32
+	ItemState  uint32
+	Padding    uint32
+	HwndItem   syscall.Handle
+	HDC        syscall.Handle
+	RcItem     rect
+	ItemData   uintptr
+}
+
+type buttonVisual struct {
+	Icon    string
+	Primary bool
+	Danger  bool
+}
+
+var (
+	user32   = syscall.NewLazyDLL("user32.dll")
+	kernel32 = syscall.NewLazyDLL("kernel32.dll")
+	gdi32    = syscall.NewLazyDLL("gdi32.dll")
+	shell32  = syscall.NewLazyDLL("shell32.dll")
+	comdlg32 = syscall.NewLazyDLL("comdlg32.dll")
+	ole32    = syscall.NewLazyDLL("ole32.dll")
+	comctl32 = syscall.NewLazyDLL("comctl32.dll")
+
+	procRegisterClassExW    = user32.NewProc("RegisterClassExW")
+	procCreateWindowExW     = user32.NewProc("CreateWindowExW")
+	procDefWindowProcW      = user32.NewProc("DefWindowProcW")
+	procShowWindow          = user32.NewProc("ShowWindow")
+	procUpdateWindow        = user32.NewProc("UpdateWindow")
+	procGetMessageW         = user32.NewProc("GetMessageW")
+	procTranslateMessage    = user32.NewProc("TranslateMessage")
+	procDispatchMessageW    = user32.NewProc("DispatchMessageW")
+	procPostQuitMessage     = user32.NewProc("PostQuitMessage")
+	procDestroyWindow       = user32.NewProc("DestroyWindow")
+	procSendMessageW        = user32.NewProc("SendMessageW")
+	procSetWindowTextW      = user32.NewProc("SetWindowTextW")
+	procGetWindowTextW      = user32.NewProc("GetWindowTextW")
+	procGetWindowTextLen    = user32.NewProc("GetWindowTextLengthW")
+	procEnableWindow        = user32.NewProc("EnableWindow")
+	procMessageBoxW         = user32.NewProc("MessageBoxW")
+	procLoadCursorW         = user32.NewProc("LoadCursorW")
+	procLoadImageW          = user32.NewProc("LoadImageW")
+	procDestroyIcon         = user32.NewProc("DestroyIcon")
+	procDrawIconEx          = user32.NewProc("DrawIconEx")
+	procDrawTextW           = user32.NewProc("DrawTextW")
+	procDrawFocusRect       = user32.NewProc("DrawFocusRect")
+	procFillRect            = user32.NewProc("FillRect")
+	procFrameRect           = user32.NewProc("FrameRect")
+	procInvalidateRect      = user32.NewProc("InvalidateRect")
+	procGetWindowLongW      = user32.NewProc("GetWindowLongW")
+	procSetWindowLongW      = user32.NewProc("SetWindowLongW")
+	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
+	procSetTextColor        = gdi32.NewProc("SetTextColor")
+	procSetBkColor          = gdi32.NewProc("SetBkColor")
+	procSetBkMode           = gdi32.NewProc("SetBkMode")
+	procSelectObject        = gdi32.NewProc("SelectObject")
+	procCreateSolidBrush    = gdi32.NewProc("CreateSolidBrush")
+	procCreateFontW         = gdi32.NewProc("CreateFontW")
+	procDeleteObject        = gdi32.NewProc("DeleteObject")
+
+	procGetModuleHandleW     = kernel32.NewProc("GetModuleHandleW")
+	procGetOEMCP             = kernel32.NewProc("GetOEMCP")
+	procMultiByteToWideChar  = kernel32.NewProc("MultiByteToWideChar")
+	procGetStockObject       = gdi32.NewProc("GetStockObject")
+	procShellExecuteW        = shell32.NewProc("ShellExecuteW")
+	procIsUserAnAdmin        = shell32.NewProc("IsUserAnAdmin")
+	procGetOpenFileNameW     = comdlg32.NewProc("GetOpenFileNameW")
+	procGetSaveFileNameW     = comdlg32.NewProc("GetSaveFileNameW")
+	procSHBrowseForFolderW   = shell32.NewProc("SHBrowseForFolderW")
+	procSHGetPathFromIDListW = shell32.NewProc("SHGetPathFromIDListW")
+	procCoTaskMemFree        = ole32.NewProc("CoTaskMemFree")
+	procCoInitializeEx       = ole32.NewProc("CoInitializeEx")
+	procCoUninitialize       = ole32.NewProc("CoUninitialize")
+	procInitCommonControls   = comctl32.NewProc("InitCommonControls")
+	procImageListCreate      = comctl32.NewProc("ImageList_Create")
+	procImageListReplaceIcon = comctl32.NewProc("ImageList_ReplaceIcon")
+	procImageListDestroy     = comctl32.NewProc("ImageList_Destroy")
+
+	procOpenClipboard    = user32.NewProc("OpenClipboard")
+	procCloseClipboard   = user32.NewProc("CloseClipboard")
+	procEmptyClipboard   = user32.NewProc("EmptyClipboard")
+	procSetClipboardData = user32.NewProc("SetClipboardData")
+	procGlobalAlloc      = kernel32.NewProc("GlobalAlloc")
+	procGlobalLock       = kernel32.NewProc("GlobalLock")
+	procGlobalUnlock     = kernel32.NewProc("GlobalUnlock")
+	procGlobalFree       = kernel32.NewProc("GlobalFree")
+	procMoveMemory       = kernel32.NewProc("RtlMoveMemory")
+)
+
+var (
+	mainHwnd        syscall.Handle
+	helpHwnd        syscall.Handle
+	helpContentHwnd syscall.Handle
+	controls        = map[int]syscall.Handle{}
+	guiFont         syscall.Handle
+	titleFont       syscall.Handle
+	sectionFont     syscall.Handle
+	monoFont        syscall.Handle
+	logBrush        syscall.Handle
+
+	runMu         sync.Mutex
+	currentCancel context.CancelFunc
+	running       bool
+
+	logMu           sync.Mutex
+	logText         string
+	passwordVisible bool
+	detailedLog     bool
+
+	resultMu          sync.Mutex
+	lastHeader        databaseHeader
+	lastBackup        string
+	lastReport        string
+	lastRecoveryState string
+
+	recoveryTechnicalLogMu sync.Mutex
+	recoveryTechnicalLog   string
+
+	uiAssetDir string
+	imageLists []uintptr
+	liveIcons  []syscall.Handle
+	iconCache  = map[string]syscall.Handle{}
+
+	buttonVisuals = map[int]buttonVisual{
+		idSourceBtn:      {Icon: "folder"},
+		idDestBtn:        {Icon: "folder"},
+		idBackupDirBtn:   {Icon: "folder"},
+		idFbSourceBtn:    {Icon: "gear"},
+		idFbTargetBtn:    {Icon: "gear"},
+		idPasswordToggle: {Icon: "eye"},
+		idExecute:        {Icon: "play", Primary: true},
+		idStop:           {Icon: "stop", Danger: true},
+		idOpenDest:       {Icon: "folder"},
+		idCopyPath:       {Icon: "copy"},
+		idHelp:           {Icon: "help"},
+		idDetailedLog:    {Icon: "details"},
+		idClearLog:       {Icon: "clear"},
+		idCopyLog:        {Icon: "copy"},
+	}
+)
+
+func u16(s string) *uint16 {
+	p, _ := syscall.UTF16PtrFromString(s)
+	return p
+}
+
+func u16buf(s string) []uint16 {
+	r := utf16.Encode([]rune(s))
+	return append(r, 0)
+}
+
+func makeFilter(parts ...string) []uint16 {
+	s := strings.Join(parts, "\x00") + "\x00\x00"
+	return utf16.Encode([]rune(s))
+}
+
+func rgb(r, g, b byte) uintptr {
+	return uintptr(uint32(r) | uint32(g)<<8 | uint32(b)<<16)
+}
+
+func messageBox(title, text string, flags uintptr) int {
+	r, _, _ := procMessageBoxW.Call(uintptr(mainHwnd), uintptr(unsafe.Pointer(u16(text))), uintptr(unsafe.Pointer(u16(title))), flags)
+	return int(r)
+}
+
+func prepareUIAssets() {
+	dir := filepath.Join(os.TempDir(), "FirebirdToolbox", "ui-v"+appVersion)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return
+	}
+	for _, name := range []string{"flame", "gear", "folder", "database", "restore", "play", "stop", "help", "details", "clear", "copy", "eye", "terminal"} {
+		data, err := embeddedFiles.ReadFile("assets/" + name + ".ico")
+		if err != nil {
+			continue
+		}
+		_ = os.WriteFile(filepath.Join(dir, name+".ico"), data, 0600)
+	}
+	uiAssetDir = dir
+}
+
+func loadUIIcon(name string, size int32) syscall.Handle {
+	if uiAssetDir == "" {
+		return 0
+	}
+	path := filepath.Join(uiAssetDir, name+".ico")
+	h, _, _ := procLoadImageW.Call(0, uintptr(unsafe.Pointer(u16(path))), IMAGE_ICON, uintptr(size), uintptr(size), LR_LOADFROMFILE)
+	return syscall.Handle(h)
+}
+
+func cachedUIIcon(name string, size int32) syscall.Handle {
+	key := fmt.Sprintf("%s:%d", name, size)
+	if h := iconCache[key]; h != 0 {
+		return h
+	}
+	h := loadUIIcon(name, size)
+	if h != 0 {
+		iconCache[key] = h
+		liveIcons = append(liveIcons, h)
+	}
+	return h
+}
+
+func addIcon(name string, x, y, size int32) syscall.Handle {
+	hwnd := createControl(0, "STATIC", "", WS_CHILD|WS_VISIBLE|SS_ICON, x, y, size, size, 0)
+	icon := cachedUIIcon(name, size)
+	if icon != 0 {
+		procSendMessageW.Call(uintptr(hwnd), STM_SETICON, uintptr(icon), 0)
+	}
+	return hwnd
+}
+
+func addSectionHeader(id int, name, title string, x, y int32) {
+	addIcon(name, x, y+1, 18)
+	h := createControl(0, "STATIC", title, WS_CHILD|WS_VISIBLE, x+26, y, 300, 22, id)
+	if sectionFont != 0 {
+		procSendMessageW.Call(uintptr(h), WM_SETFONT, uintptr(sectionFont), 1)
+	}
+}
+
+func createIconButton(id int, text string, x, y, w, h int32) syscall.Handle {
+	return createControl(0, "BUTTON", text, WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW, x, y, w, h, id)
+}
+
+func drawText(hdc syscall.Handle, text string, rc *rect, flags uintptr) {
+	chars := utf16.Encode([]rune(text))
+	if len(chars) == 0 {
+		return
+	}
+	procDrawTextW.Call(uintptr(hdc), uintptr(unsafe.Pointer(&chars[0])), uintptr(len(chars)), uintptr(unsafe.Pointer(rc)), flags)
+}
+
+func drawOwnerButton(dis *drawItemStruct) bool {
+	visual, ok := buttonVisuals[int(dis.CtlID)]
+	if !ok {
+		return false
+	}
+	disabled := dis.ItemState&ODS_DISABLED != 0
+	pressed := dis.ItemState&ODS_SELECTED != 0
+
+	bg := rgb(248, 250, 252)
+	border := rgb(203, 213, 225)
+	fg := rgb(51, 65, 85)
+	if visual.Primary {
+		bg = rgb(37, 99, 235)
+		border = rgb(29, 78, 216)
+		fg = rgb(255, 255, 255)
+	} else if visual.Danger {
+		bg = rgb(255, 247, 247)
+		border = rgb(252, 165, 165)
+		fg = rgb(185, 28, 28)
+	}
+	if pressed {
+		if visual.Primary {
+			bg = rgb(29, 78, 216)
+		} else {
+			bg = rgb(226, 232, 240)
+		}
+	}
+	if disabled {
+		bg = rgb(241, 245, 249)
+		border = rgb(226, 232, 240)
+		fg = rgb(148, 163, 184)
+	}
+
+	bgBrush, _, _ := procCreateSolidBrush.Call(bg)
+	borderBrush, _, _ := procCreateSolidBrush.Call(border)
+	procFillRect.Call(uintptr(dis.HDC), uintptr(unsafe.Pointer(&dis.RcItem)), bgBrush)
+	procFrameRect.Call(uintptr(dis.HDC), uintptr(unsafe.Pointer(&dis.RcItem)), borderBrush)
+	procDeleteObject.Call(bgBrush)
+	procDeleteObject.Call(borderBrush)
+
+	procSetBkMode.Call(uintptr(dis.HDC), TRANSPARENT)
+	procSetTextColor.Call(uintptr(dis.HDC), fg)
+	buttonFont := guiFont
+	if visual.Primary && sectionFont != 0 {
+		buttonFont = sectionFont
+	}
+	oldFont, _, _ := procSelectObject.Call(uintptr(dis.HDC), uintptr(buttonFont))
+	defer procSelectObject.Call(uintptr(dis.HDC), oldFont)
+
+	offset := int32(0)
+	if pressed {
+		offset = 1
+	}
+	textRect := dis.RcItem
+	if icon := cachedUIIcon(visual.Icon, 16); icon != 0 {
+		ix := dis.RcItem.left + 10 + offset
+		iy := dis.RcItem.top + (dis.RcItem.bottom-dis.RcItem.top-16)/2 + offset
+		procDrawIconEx.Call(uintptr(dis.HDC), uintptr(ix), uintptr(iy), uintptr(icon), 16, 16, 0, 0, DI_NORMAL)
+		textRect.left += 24
+	}
+	textRect.left += offset
+	textRect.top += offset
+	drawText(dis.HDC, getText(int(dis.CtlID)), &textRect, DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS)
+
+	if dis.ItemState&ODS_FOCUS != 0 && !disabled {
+		focus := dis.RcItem
+		focus.left += 3
+		focus.top += 3
+		focus.right -= 3
+		focus.bottom -= 3
+		procDrawFocusRect.Call(uintptr(dis.HDC), uintptr(unsafe.Pointer(&focus)))
+	}
+	return true
+}
+
+func attachButtonIcon(id int, name string) {
+	hwnd := controls[id]
+	if hwnd == 0 {
+		showStartupFailure("nao foi possivel criar a janela principal")
+		return
+	}
+	icon := loadUIIcon(name, 16)
+	if icon == 0 {
+		return
+	}
+	himl, _, _ := procImageListCreate.Call(16, 16, ILC_COLOR32|ILC_MASK, 1, 1)
+	if himl == 0 {
+		procDestroyIcon.Call(uintptr(icon))
+		return
+	}
+	idx, _, _ := procImageListReplaceIcon.Call(himl, ^uintptr(0), uintptr(icon))
+	procDestroyIcon.Call(uintptr(icon))
+	if int32(idx) < 0 {
+		procImageListDestroy.Call(himl)
+		return
+	}
+	bil := buttonImageList{himl: himl, margin: rect{left: 5, top: 1, right: 5, bottom: 1}, uAlign: BUTTON_ICON_LEFT}
+	procSendMessageW.Call(uintptr(hwnd), BCM_SETIMAGELIST, 0, uintptr(unsafe.Pointer(&bil)))
+	imageLists = append(imageLists, himl)
+}
+
+func addSectionIcon(name string, x, y int32) {
+	hwnd := createControl(0, "STATIC", "", WS_CHILD|WS_VISIBLE|SS_ICON, x, y, 20, 20, 0)
+	icon := loadUIIcon(name, 16)
+	if icon == 0 {
+		return
+	}
+	procSendMessageW.Call(uintptr(hwnd), STM_SETICON, uintptr(icon), 0)
+	liveIcons = append(liveIcons, icon)
+}
+
+func setAppIcons() {
+	small := loadUIIcon("flame", 16)
+	big := loadUIIcon("flame", 32)
+	if small != 0 {
+		procSendMessageW.Call(uintptr(mainHwnd), WM_SETICON, ICON_SMALL, uintptr(small))
+		liveIcons = append(liveIcons, small)
+	}
+	if big != 0 {
+		procSendMessageW.Call(uintptr(mainHwnd), WM_SETICON, ICON_BIG, uintptr(big))
+		liveIcons = append(liveIcons, big)
+	}
+}
+
+func cleanupUIAssets() {
+	for _, h := range imageLists {
+		if h != 0 {
+			procImageListDestroy.Call(h)
+		}
+	}
+	imageLists = nil
+	for _, h := range liveIcons {
+		if h != 0 {
+			procDestroyIcon.Call(uintptr(h))
+		}
+	}
+	liveIcons = nil
+	iconCache = map[string]syscall.Handle{}
+	if uiAssetDir != "" {
+		_ = os.RemoveAll(uiAssetDir)
+	}
+}
+
+func setText(id int, text string) {
+	h := controls[id]
+	if h != 0 {
+		procSetWindowTextW.Call(uintptr(h), uintptr(unsafe.Pointer(u16(text))))
+	}
+}
+
+func getText(id int) string {
+	h := controls[id]
+	if h == 0 {
+		return ""
+	}
+	n, _, _ := procGetWindowTextLen.Call(uintptr(h))
+	if n == 0 {
+		return ""
+	}
+	buf := make([]uint16, n+1)
+	procGetWindowTextW.Call(uintptr(h), uintptr(unsafe.Pointer(&buf[0])), n+1)
+	return syscall.UTF16ToString(buf)
+}
+
+func enableControl(id int, enabled bool) {
+	h := controls[id]
+	if h == 0 {
+		return
+	}
+	value := uintptr(0)
+	if enabled {
+		value = 1
+	}
+	procEnableWindow.Call(uintptr(h), value)
+}
+
+func createControl(exStyle uint32, className, text string, style uint32, x, y, w, h int32, id int) syscall.Handle {
+	hwnd, _, _ := procCreateWindowExW.Call(
+		uintptr(exStyle),
+		uintptr(unsafe.Pointer(u16(className))),
+		uintptr(unsafe.Pointer(u16(text))),
+		uintptr(style),
+		uintptr(x), uintptr(y), uintptr(w), uintptr(h),
+		uintptr(mainHwnd), uintptr(id), 0, 0,
+	)
+	handle := syscall.Handle(hwnd)
+	if id != 0 {
+		controls[id] = handle
+	}
+	if guiFont != 0 {
+		procSendMessageW.Call(uintptr(handle), WM_SETFONT, uintptr(guiFont), 1)
+	}
+	return handle
+}
+
+func setControlFont(id int, font syscall.Handle) {
+	if h := controls[id]; h != 0 && font != 0 {
+		procSendMessageW.Call(uintptr(h), WM_SETFONT, uintptr(font), 1)
+	}
+}
+
+func comboIndex(id int) int {
+	r, _, _ := procSendMessageW.Call(uintptr(controls[id]), CB_GETCURSEL, 0, 0)
+	if int(r) < 0 {
+		return 0
+	}
+	return int(r)
+}
+
+func setCombo(id, idx int) {
+	procSendMessageW.Call(uintptr(controls[id]), CB_SETCURSEL, uintptr(idx), 0)
+}
+
+func selectedRoutine() routineDef {
+	idx := comboIndex(idRoutine)
+	if idx < 0 || idx >= len(routines) {
+		return routines[0]
+	}
+	return routines[idx]
+}
+
+func selectedSourceVersion() string {
+	idx := comboIndex(idSourceVersion)
+	if idx < 0 || idx >= len(versions) {
+		return "5.0"
+	}
+	return versions[idx]
+}
+
+func selectedRestoreVersion() string {
+	idx := comboIndex(idRestoreVersion)
+	if idx <= 0 || idx >= len(restoreVersions) {
+		return ""
+	}
+	return restoreVersions[idx]
+}
+
+func versionIndex(version string) int {
+	for i, v := range versions {
+		if v == version {
+			return i
+		}
+	}
+	return 0
+}
+
+func restoreVersionIndex(version string) int {
+	for i, v := range restoreVersions {
+		if v == version {
+			return i
+		}
+	}
+	return 0
+}
+
+func versionDirName(version string) string {
+	return "Firebird_" + strings.ReplaceAll(version, ".", "_")
+}
+
+func versionUsesBin(version string) bool {
+	switch version {
+	case "1.0", "1.5", "2.0", "2.1", "2.5":
+		return true
+	default:
+		return false
+	}
+}
+
+func standardFirebirdRoots(version string) []string {
+	dirName := versionDirName(version)
+	bases := []string{
+		os.Getenv("ProgramFiles"),
+		os.Getenv("ProgramFiles(x86)"),
+		`C:\Program Files`,
+		`C:\Program Files (x86)`,
+	}
+	seen := map[string]bool{}
+	var roots []string
+	for _, base := range bases {
+		base = strings.TrimSpace(base)
+		if base == "" {
+			continue
+		}
+		root := filepath.Join(base, "Firebird", dirName)
+		key := strings.ToLower(filepath.Clean(root))
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		roots = append(roots, root)
+	}
+	if d, ok := defaults[version]; ok {
+		key := strings.ToLower(filepath.Clean(d.Root))
+		if !seen[key] {
+			roots = append([]string{d.Root}, roots...)
+		}
+	}
+	return roots
+}
+
+func isKnownDefaultFB(s string) bool {
+	sl := strings.ToLower(strings.TrimSpace(s))
+	if sl == "" {
+		return true
+	}
+	for _, version := range versions {
+		for _, root := range standardFirebirdRoots(version) {
+			if strings.EqualFold(filepath.Clean(s), filepath.Clean(root)) {
+				return true
+			}
+		}
+	}
+	return strings.Contains(sl, `\firebird\firebird_`)
+}
+
+func detectFirebird(version string) string {
+	fallback := defaults[version].Root
+	for _, c := range standardFirebirdRoots(version) {
+		if fileExists(firebirdExe(c, version, "gbak.exe")) {
+			return c
+		}
+	}
+	return fallback
+}
+
+func detectFirebirdPort(root, version string) string {
+	fallback := defaults[version].Port
+	root = strings.TrimRight(strings.TrimSpace(root), `\/`)
+	if root == "" {
+		return fallback
+	}
+	config := filepath.Join(root, "firebird.conf")
+	data, err := os.ReadFile(config)
+	if err != nil {
+		return fallback
+	}
+	for _, raw := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 || !strings.EqualFold(strings.TrimSpace(parts[0]), "RemoteServicePort") {
+			continue
+		}
+		port := strings.TrimSpace(strings.SplitN(parts[1], "#", 2)[0])
+		if _, err := strconv.Atoi(port); err == nil && port != "" {
+			return port
+		}
+	}
+	return fallback
+}
+
+func decodeWindowsBytes(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	if utf8.Valid(data) {
+		return string(data)
+	}
+	cp, _, _ := procGetOEMCP.Call()
+	if cp == 0 {
+		cp = 437
+	}
+	n, _, _ := procMultiByteToWideChar.Call(cp, 0, uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)), 0, 0)
+	if n == 0 {
+		return strings.ToValidUTF8(string(data), "?")
+	}
+	buf := make([]uint16, int(n))
+	procMultiByteToWideChar.Call(cp, 0, uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)), uintptr(unsafe.Pointer(&buf[0])), n)
+	return string(utf16.Decode(buf))
+}
+
+func runCommandCapture(ctx context.Context, exe string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, exe, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: CREATE_NO_WINDOW}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
+	return strings.TrimSpace(decodeWindowsBytes(out.Bytes())), err
+}
+
+func portReachable(port string) bool {
+	port = strings.TrimSpace(port)
+	if port == "" {
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 1200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+func serviceLooksAutomatic(service string) bool {
+	service = strings.ToLower(strings.TrimSpace(service))
+	return service == "" || service == "-" || strings.HasPrefix(service, "autom")
+}
+
+func serviceQueryOK(ctx context.Context, name string) bool {
+	if strings.TrimSpace(name) == "" {
+		return false
+	}
+	_, err := runCommandCapture(ctx, "sc.exe", "query", name)
+	return err == nil
+}
+
+func detectFirebirdService(ctx context.Context, root, preferred string) string {
+	if !serviceLooksAutomatic(preferred) && serviceQueryOK(ctx, preferred) {
+		return preferred
+	}
+	output, err := runCommandCapture(ctx, "sc.exe", "query", "type=", "service", "state=", "all")
+	if err != nil || output == "" {
+		return ""
+	}
+	rootLower := strings.ToLower(filepath.Clean(strings.TrimSpace(root)))
+	seen := map[string]bool{}
+	fallback := ""
+	for _, raw := range strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(raw)
+		if !strings.Contains(strings.ToLower(line), "firebird") || !strings.Contains(line, ":") {
+			continue
+		}
+		name := strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
+		if name == "" || seen[strings.ToLower(name)] || !serviceQueryOK(ctx, name) {
+			continue
+		}
+		seen[strings.ToLower(name)] = true
+		if fallback == "" {
+			fallback = name
+		}
+		qc, _ := runCommandCapture(ctx, "sc.exe", "qc", name)
+		if rootLower != "" && strings.Contains(strings.ToLower(qc), rootLower) {
+			return name
+		}
+	}
+	return fallback
+}
+
+func verifyFirebirdEndpoint(ctx context.Context, label, version, root, service, port string) (string, error) {
+	appendLog("Verificando Firebird " + label + "...")
+	resolvedPort := strings.TrimSpace(port)
+	if !portReachable(resolvedPort) {
+		configured := detectFirebirdPort(root, version)
+		if configured != resolvedPort && portReachable(configured) {
+			resolvedPort = configured
+			appendLog("Porta detectada automaticamente: " + resolvedPort + ".")
+		} else {
+			return "", fmt.Errorf("não foi possível conectar ao Firebird %s em 127.0.0.1:%s", version, resolvedPort)
+		}
+	}
+	appendLog("\u2713 Firebird dispon\u00edvel em 127.0.0.1:" + resolvedPort + ".")
+	if svc := detectFirebirdService(ctx, root, service); svc != "" {
+		appendLog("Servi\u00e7o detectado: " + svc + ".")
+	} else if detailedLog {
+		appendLog("Servi\u00e7o Windows n\u00e3o identificado; a porta est\u00e1 respondendo normalmente.")
+	}
+	return resolvedPort, nil
+}
+
+func firebirdExe(root, version, exe string) string {
+	root = strings.TrimRight(strings.TrimSpace(root), `\/`)
+	if root == "" {
+		return ""
+	}
+	if strings.EqualFold(filepath.Base(root), "bin") {
+		candidate := filepath.Join(root, exe)
+		if fileExists(candidate) || versionUsesBin(version) {
+			return candidate
+		}
+		root = filepath.Dir(root)
+	}
+
+	rootCandidate := filepath.Join(root, exe)
+	binCandidate := filepath.Join(root, "bin", exe)
+	if fileExists(rootCandidate) {
+		return rootCandidate
+	}
+	if fileExists(binCandidate) {
+		return binCandidate
+	}
+	if versionUsesBin(version) {
+		return binCandidate
+	}
+	return rootCandidate
+}
+
+func normalizeFBRoot(selectedExe, version string) string {
+	dir := filepath.Dir(selectedExe)
+	if strings.EqualFold(filepath.Base(dir), "bin") {
+		return filepath.Dir(dir)
+	}
+	return dir
+}
+
+func fileExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && !st.IsDir()
+}
+
+func dirExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && st.IsDir()
+}
+
+func suffixForVersion(version string) string {
+	switch version {
+	case "1.0":
+		return "10.RED"
+	case "1.5":
+		return "15.RED"
+	case "2.0":
+		return "20.RED"
+	case "2.1":
+		return "21.RED"
+	case "2.5":
+		return "25.RED"
+	case "3.0":
+		return "30.RED"
+	case "4.0":
+		return "40.RED"
+	case "5.0":
+		return "50.RED"
+	default:
+		return ".RED"
+	}
+}
+
+func suggestDestination(src, version string) string {
+	if src == "" || version == "" {
+		return ""
+	}
+	dir := filepath.Dir(src)
+	base := strings.TrimSuffix(filepath.Base(src), filepath.Ext(src))
+	for _, suffix := range []string{"10", "15", "20", "21", "25", "30", "40", "50"} {
+		base = strings.TrimSuffix(base, suffix)
+	}
+	base = strings.TrimSpace(strings.TrimSuffix(base, "-"))
+	if base == "" {
+		base = "DBCOM"
+	}
+	return filepath.Join(dir, base+suffixForVersion(version))
+}
+
+func openDialog(title string, backup bool) string {
+	buf := make([]uint16, 32768)
+	var filter []uint16
+	if backup {
+		filter = makeFilter("Backups Firebird (*.BAK;*.FBK;*.GBK)", "*.BAK;*.FBK;*.GBK", "Todos os arquivos (*.*)", "*.*")
+	} else {
+		filter = makeFilter("Banco Firebird (*.FDB;*.RED)", "*.FDB;*.RED", "Todos os arquivos (*.*)", "*.*")
+	}
+	t := u16buf(title)
+	ofn := openFileName{
+		lStructSize: uint32(unsafe.Sizeof(openFileName{})),
+		hwndOwner:   mainHwnd,
+		lpstrFilter: &filter[0],
+		lpstrFile:   &buf[0],
+		nMaxFile:    uint32(len(buf)),
+		lpstrTitle:  &t[0],
+		flags:       OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_HIDEREADONLY,
+	}
+	r, _, _ := procGetOpenFileNameW.Call(uintptr(unsafe.Pointer(&ofn)))
+	if r == 0 {
+		return ""
+	}
+	return syscall.UTF16ToString(buf)
+}
+
+func saveDialog(title, initial string) string {
+	buf := make([]uint16, 32768)
+	copy(buf, u16buf(initial))
+	filter := makeFilter("Banco Firebird (*.RED;*.FDB)", "*.RED;*.FDB", "Todos os arquivos (*.*)", "*.*")
+	t := u16buf(title)
+	def := u16buf("RED")
+	ofn := openFileName{
+		lStructSize: uint32(unsafe.Sizeof(openFileName{})),
+		hwndOwner:   mainHwnd,
+		lpstrFilter: &filter[0],
+		lpstrFile:   &buf[0],
+		nMaxFile:    uint32(len(buf)),
+		lpstrTitle:  &t[0],
+		lpstrDefExt: &def[0],
+		flags:       OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_OVERWRITEPROMPT,
+	}
+	r, _, _ := procGetSaveFileNameW.Call(uintptr(unsafe.Pointer(&ofn)))
+	if r == 0 {
+		return ""
+	}
+	return syscall.UTF16ToString(buf)
+}
+
+func chooseFolder(title string) string {
+	display := make([]uint16, 260)
+	t := u16buf(title)
+	bi := browseInfo{
+		hwndOwner:      mainHwnd,
+		pszDisplayName: &display[0],
+		lpszTitle:      &t[0],
+		ulFlags:        BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+	}
+	pidl, _, _ := procSHBrowseForFolderW.Call(uintptr(unsafe.Pointer(&bi)))
+	if pidl == 0 {
+		return ""
+	}
+	defer procCoTaskMemFree.Call(pidl)
+	pathBuf := make([]uint16, 32768)
+	ok, _, _ := procSHGetPathFromIDListW.Call(pidl, uintptr(unsafe.Pointer(&pathBuf[0])))
+	if ok == 0 {
+		return ""
+	}
+	return syscall.UTF16ToString(pathBuf)
+}
+
+func chooseGbak(version string) string {
+	buf := make([]uint16, 32768)
+	filter := makeFilter("gbak.exe", "gbak.exe", "Executaveis (*.exe)", "*.exe", "Todos os arquivos (*.*)", "*.*")
+	title := u16buf("Selecione o gbak.exe do Firebird " + version)
+	ofn := openFileName{
+		lStructSize: uint32(unsafe.Sizeof(openFileName{})),
+		hwndOwner:   mainHwnd,
+		lpstrFilter: &filter[0],
+		lpstrFile:   &buf[0],
+		nMaxFile:    uint32(len(buf)),
+		lpstrTitle:  &title[0],
+		flags:       OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+	}
+	r, _, _ := procGetOpenFileNameW.Call(uintptr(unsafe.Pointer(&ofn)))
+	if r == 0 {
+		return ""
+	}
+	return syscall.UTF16ToString(buf)
+}
+
+func appendLog(text string) {
+	text = strings.TrimRight(text, "\r\n")
+	if text == "" {
+		return
+	}
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	stamp := time.Now().Format("15:04:05")
+	var b strings.Builder
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		b.WriteString("[")
+		b.WriteString(stamp)
+		b.WriteString("] ")
+		b.WriteString(line)
+		b.WriteString("\r\n")
+	}
+	chunk := b.String()
+	if chunk == "" {
+		return
+	}
+
+	logMu.Lock()
+	logText += chunk
+	if len(logText) > 250000 {
+		logText = logText[len(logText)-200000:]
+	}
+	logMu.Unlock()
+
+	h := controls[idLog]
+	if h == 0 {
+		return
+	}
+	procSendMessageW.Call(uintptr(h), EM_SETSEL, ^uintptr(0), ^uintptr(0))
+	procSendMessageW.Call(uintptr(h), EM_REPLACESEL, 0, uintptr(unsafe.Pointer(u16(chunk))))
+	procSendMessageW.Call(uintptr(h), EM_SCROLLCARET, 0, 0)
+}
+
+func clearLog() {
+	logMu.Lock()
+	logText = ""
+	logMu.Unlock()
+	setText(idLog, "")
+}
+
+func copyTextToClipboard(text, successStatus string) bool {
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	if r, _, _ := procOpenClipboard.Call(uintptr(mainHwnd)); r == 0 {
+		messageBox("Firebird Toolbox", "Não foi possível abrir a área de transferência.", MB_OK|MB_ICONWARNING)
+		return false
+	}
+	defer procCloseClipboard.Call()
+	procEmptyClipboard.Call()
+
+	data := u16buf(text)
+	size := uintptr(len(data) * 2)
+	hMem, _, _ := procGlobalAlloc.Call(GMEM_MOVEABLE, size)
+	if hMem == 0 {
+		return false
+	}
+	p, _, _ := procGlobalLock.Call(hMem)
+	if p == 0 {
+		procGlobalFree.Call(hMem)
+		return false
+	}
+	procMoveMemory.Call(p, uintptr(unsafe.Pointer(&data[0])), size)
+	procGlobalUnlock.Call(hMem)
+	if r, _, _ := procSetClipboardData.Call(CF_UNICODETEXT, hMem); r == 0 {
+		procGlobalFree.Call(hMem)
+		return false
+	}
+	if successStatus != "" {
+		setText(idStatus, successStatus)
+	}
+	return true
+}
+
+func setProgress(percent int, text string) {
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	if h := controls[idProgress]; h != 0 {
+		procSendMessageW.Call(uintptr(h), PBM_SETPOS, uintptr(percent), 0)
+	}
+	if text != "" {
+		setText(idProgressText, text)
+	}
+}
+
+func setProgressState(state uintptr) {
+	if h := controls[idProgress]; h != 0 {
+		procSendMessageW.Call(uintptr(h), PBM_SETSTATE, state, 0)
+	}
+}
+
+// setTerminalProgress encerra visualmente a barra em 100% para qualquer estado
+// terminal do fluxo. O ProgressBar nativo do Windows anima PBM_SETPOS; a pequena
+// oscilacao 100 -> 99 -> 100 elimina o atraso visual que podia deixar a barra
+// aparentemente incompleta quando a dialog final era aberta imediatamente.
+func setTerminalProgress(state uintptr, text string) {
+	setProgressState(state)
+	if h := controls[idProgress]; h != 0 {
+		procSendMessageW.Call(uintptr(h), PBM_SETPOS, 100, 0)
+		procSendMessageW.Call(uintptr(h), PBM_SETPOS, 99, 0)
+		procSendMessageW.Call(uintptr(h), PBM_SETPOS, 100, 0)
+		procInvalidateRect.Call(uintptr(h), 0, 1)
+		procUpdateWindow.Call(uintptr(h))
+	}
+	if text != "" {
+		setText(idProgressText, text)
+	}
+	if mainHwnd != 0 {
+		procUpdateWindow.Call(uintptr(mainHwnd))
+	}
+}
+
+func resetRunResult() {
+	resultMu.Lock()
+	lastHeader = databaseHeader{}
+	lastBackup = ""
+	lastReport = ""
+	lastRecoveryState = ""
+	resultMu.Unlock()
+	setText(idResult, "Aguardando execução")
+	setProgressState(PBST_NORMAL)
+	setProgress(0, "Preparando...")
+}
+
+func setLastBackup(path string) {
+	resultMu.Lock()
+	lastBackup = path
+	resultMu.Unlock()
+}
+
+func setLastHeader(h databaseHeader) {
+	resultMu.Lock()
+	lastHeader = h
+	resultMu.Unlock()
+}
+
+func setLastReport(path string) {
+	resultMu.Lock()
+	lastReport = path
+	resultMu.Unlock()
+}
+
+func setLastRecoveryState(state string) {
+	resultMu.Lock()
+	lastRecoveryState = state
+	resultMu.Unlock()
+}
+
+func recoveryStateSnapshot() string {
+	resultMu.Lock()
+	defer resultMu.Unlock()
+	return lastRecoveryState
+}
+
+func runResultSnapshot() (databaseHeader, string, string) {
+	resultMu.Lock()
+	defer resultMu.Unlock()
+	return lastHeader, lastBackup, lastReport
+}
+
+func successSummary(c workflowConfig) (string, string) {
+	h, backup, report := runResultSnapshot()
+	recoveryState := recoveryStateSnapshot()
+	var lines []string
+	compact := "✓ Concluído"
+	if strings.Contains(strings.ToUpper(recoveryState), "PARCIAL") {
+		lines = append(lines, "Recuperação parcial concluída.", "", "Rotina: "+c.Routine.Name)
+		compact = "⚠ Recuperação parcial"
+	} else {
+		lines = append(lines, "Rotina concluída com sucesso.", "", "Rotina: "+c.Routine.Name)
+	}
+	if recoveryState != "" {
+		lines = append(lines, "Estado: "+recoveryState)
+	}
+	if c.TargetVersion != "" {
+		lines = append(lines, "Firebird de destino: "+c.TargetVersion)
+		compact += " | FB " + c.TargetVersion
+	}
+	if c.Dest != "" && (c.TargetVersion != "" || c.Routine.Kind == routineRestore) {
+		lines = append(lines, "Arquivo gerado: "+c.Dest)
+	}
+	if backup != "" {
+		lines = append(lines, "Backup: "+backup)
+	}
+	if report != "" {
+		lines = append(lines, "Relatório: "+report)
+	}
+	if h.ODS != "" {
+		lines = append(lines, "ODS: "+h.ODS)
+		compact += " | ODS " + h.ODS
+	}
+	if h.Dialect != "" {
+		lines = append(lines, "Dialeto: "+h.Dialect)
+		compact += " | Dialeto " + h.Dialect
+	}
+	if h.PageSize != "" {
+		lines = append(lines, "Página: "+h.PageSize+" bytes")
+	}
+	lines = append(lines, "", "Clique em OK para fechar esta confirmação.")
+	return strings.Join(lines, "\n"), compact
+}
+
+func failureSummary(err error) string {
+	state := recoveryStateSnapshot()
+	upperState := strings.ToUpper(state)
+	message := "A rotina foi encerrada com erro."
+	if strings.Contains(upperState, "AGUARDANDO DECISÃO") {
+		message = "A recuperação foi interrompida para preservar um conflito de dados que exige decisão manual."
+	} else if strings.Contains(upperState, "PARCIAL") {
+		message = "A recuperação produziu apenas um resultado parcial para inspeção; o banco não foi aprovado como recuperação completa."
+	}
+	if err != nil {
+		message += "\n\n" + err.Error()
+	}
+	_, _, report := runResultSnapshot()
+	if state != "" {
+		message += "\n\nEstado da recuperação: " + state
+	}
+	if report != "" {
+		message += "\n\nRelatório de recuperação: " + report
+	}
+	return message + "\n\nConsulte o Log de execução para os detalhes técnicos."
+}
+
+func copyLogToClipboard() {
+	logMu.Lock()
+	text := logText
+	logMu.Unlock()
+	copyTextToClipboard(text, "Log copiado para a área de transferência.")
+}
+
+func copyDestinationPath() {
+	path := ""
+	r := selectedRoutine()
+	if selectedRestoreVersion() != "" || r.Kind == routineRestore {
+		path = strings.TrimSpace(getText(idDest))
+	}
+	if path == "" {
+		_, backup, _ := runResultSnapshot()
+		path = backup
+	}
+	if path == "" {
+		path = strings.TrimSpace(getText(idBackupDir))
+	}
+	if path == "" {
+		messageBox("Firebird Toolbox", "Ainda não há um caminho de resultado para copiar.", MB_OK|MB_ICONINFO)
+		return
+	}
+	copyTextToClipboard(path, "Caminho do resultado copiado.")
+}
+
+func setRunning(value bool) {
+	runMu.Lock()
+	running = value
+	runMu.Unlock()
+	enableControl(idExecute, !value)
+	enableControl(idStop, value)
+	for _, id := range []int{idRoutine, idSourceVersion, idRestoreVersion, idSource, idSourceBtn, idDest, idDestBtn, idBackupDir, idBackupDirBtn, idFbSource, idFbSourceBtn, idFbTarget, idFbTargetBtn, idService, idSourcePort, idTargetPort, idUser, idPassword, idPasswordToggle, idDetailedLog, idSkipData} {
+		if value {
+			enableControl(id, false)
+		}
+	}
+	if !value {
+		updateUIState(false)
+	}
+}
+
+func isRunning() bool {
+	runMu.Lock()
+	defer runMu.Unlock()
+	return running
+}
+
+func sourceVersionChanged() {
+	version := selectedSourceVersion()
+	if isKnownDefaultFB(getText(idFbSource)) {
+		setText(idFbSource, detectFirebird(version))
+	}
+	d := defaults[version]
+	setText(idService, d.Service)
+	setText(idSourcePort, detectFirebirdPort(getText(idFbSource), version))
+
+	r := selectedRoutine()
+	if r.Kind == routineRepair || r.Kind == routineRepairAdvanced {
+		target := selectedRestoreVersion()
+		if target == "" {
+			setCombo(idRestoreVersion, restoreVersionIndex(version))
+			target = version
+		}
+		if target == version && isKnownDefaultFB(getText(idFbTarget)) {
+			setText(idFbTarget, detectFirebird(target))
+			setText(idTargetPort, detectFirebirdPort(getText(idFbTarget), target))
+		}
+		if src := strings.TrimSpace(getText(idSource)); src != "" && target != "" {
+			setText(idDest, suggestDestination(src, target))
+		}
+	}
+	updateUIState(false)
+}
+
+func restoreVersionChanged() {
+	target := selectedRestoreVersion()
+	if target == "" {
+		setText(idFbTarget, "")
+		setText(idTargetPort, "")
+		enableControl(idDest, false)
+		enableControl(idDestBtn, false)
+		enableControl(idFbTarget, false)
+		enableControl(idFbTargetBtn, false)
+		enableControl(idTargetPort, false)
+		return
+	}
+	if isKnownDefaultFB(getText(idFbTarget)) || strings.TrimSpace(getText(idFbTarget)) == "" {
+		setText(idFbTarget, detectFirebird(target))
+	}
+	setText(idTargetPort, detectFirebirdPort(getText(idFbTarget), target))
+	if src := strings.TrimSpace(getText(idSource)); src != "" {
+		setText(idDest, suggestDestination(src, target))
+	}
+	updateUIState(false)
+}
+
+func routineChanged() {
+	r := selectedRoutine()
+	switch r.Kind {
+	case routineRepair:
+		if selectedRestoreVersion() == "" {
+			setCombo(idRestoreVersion, restoreVersionIndex(selectedSourceVersion()))
+		}
+	case routineRepairAdvanced:
+		if selectedRestoreVersion() == "" {
+			setCombo(idRestoreVersion, restoreVersionIndex(selectedSourceVersion()))
+		}
+	case routineRestore:
+		if selectedRestoreVersion() == "" {
+			setCombo(idRestoreVersion, restoreVersionIndex("5.0"))
+		}
+	}
+	setText(idDescription, r.Description)
+	sourceVersionChanged()
+	restoreVersionChanged()
+	updateUIState(false)
+}
+
+func updateUIState(forceDisabled bool) {
+	if forceDisabled || isRunning() {
+		return
+	}
+	r := selectedRoutine()
+	target := selectedRestoreVersion()
+
+	sourceVersionEnabled := r.Kind == routineRepair || r.Kind == routineRepairAdvanced
+	restoreVersionEnabled := r.Kind == routineRepair || r.Kind == routineRepairAdvanced || r.Kind == routineRestore
+	sourceFBEnabled := r.Kind != routineRestore
+	backupDirEnabled := r.Kind == routineRepair || r.Kind == routineRepairAdvanced
+	destEnabled := target != ""
+	targetFBEnabled := destEnabled
+
+	enableControl(idSourceVersion, sourceVersionEnabled)
+	enableControl(idRestoreVersion, restoreVersionEnabled)
+	enableControl(idFbSource, sourceFBEnabled)
+	enableControl(idFbSourceBtn, sourceFBEnabled)
+	enableControl(idService, sourceFBEnabled)
+	enableControl(idSourcePort, sourceFBEnabled)
+	enableControl(idBackupDir, backupDirEnabled)
+	enableControl(idBackupDirBtn, backupDirEnabled)
+	enableControl(idDest, destEnabled)
+	enableControl(idDestBtn, destEnabled)
+	enableControl(idFbTarget, targetFBEnabled)
+	enableControl(idFbTargetBtn, targetFBEnabled)
+	enableControl(idTargetPort, targetFBEnabled)
+	enableControl(idUser, true)
+	enableControl(idPassword, true)
+	enableControl(idPasswordToggle, true)
+	enableControl(idSource, true)
+	enableControl(idSourceBtn, true)
+	advancedSkipEnabled := r.Kind == routineRepairAdvanced && versionNumber(selectedSourceVersion()) >= 3.0
+	enableControl(idSkipData, advancedSkipEnabled)
+	enableControl(lblSkipData, r.Kind == routineRepairAdvanced)
+	if r.Kind == routineRepairAdvanced {
+		if advancedSkipEnabled {
+			setText(lblSkipData, "Pular tabelas (regex):")
+		} else {
+			setText(lblSkipData, "Pular tabelas: FB 3.0+")
+		}
+	} else {
+		setText(lblSkipData, "Pular tabelas (avançado):")
+	}
+
+	if r.Kind == routineRestore {
+		setText(lblSource, "Arquivo de backup:")
+	} else {
+		setText(lblSource, "Banco de origem:")
+	}
+
+	if r.Kind == routineRestore {
+		setText(lblFbSource, "Firebird da rotina:")
+		setText(idFbSource, "Não utilizado nesta rotina")
+		setText(idService, "-")
+		setText(idSourcePort, "-")
+	} else if strings.TrimSpace(getText(idFbSource)) == "Não utilizado nesta rotina" {
+		version := selectedSourceVersion()
+		setText(idFbSource, detectFirebird(version))
+		setText(idService, defaults[version].Service)
+		setText(idSourcePort, defaults[version].Port)
+	}
+
+	if !backupDirEnabled {
+		if r.Kind == routineRestore {
+			setText(idBackupDir, "Não utilizado na restauração simples")
+		}
+	} else if strings.HasPrefix(getText(idBackupDir), "Não utilizado") {
+		if src := strings.TrimSpace(getText(idSource)); src != "" {
+			setText(idBackupDir, filepath.Dir(src))
+		} else {
+			setText(idBackupDir, "")
+		}
+	}
+}
+
+func browseSource() {
+	r := selectedRoutine()
+	backup := r.Kind == routineRestore
+	p := openDialog("Selecione o arquivo de origem", backup)
+	if p == "" {
+		return
+	}
+	setText(idSource, p)
+	if r.Kind == routineRepair || r.Kind == routineRepairAdvanced {
+		setText(idBackupDir, filepath.Dir(p))
+	}
+	if target := selectedRestoreVersion(); target != "" {
+		setText(idDest, suggestDestination(p, target))
+	}
+}
+
+func browseDestination() {
+	target := selectedRestoreVersion()
+	if target == "" {
+		return
+	}
+	initial := strings.TrimSpace(getText(idDest))
+	if initial == "" {
+		initial = suggestDestination(strings.TrimSpace(getText(idSource)), target)
+	}
+	p := saveDialog("Escolha o arquivo de destino", initial)
+	if p != "" {
+		setText(idDest, p)
+	}
+}
+
+func browseBackupDir() {
+	p := chooseFolder("Selecione a pasta onde o backup será salvo")
+	if p != "" {
+		setText(idBackupDir, p)
+	}
+}
+
+func browseFB(target bool) {
+	version := selectedSourceVersion()
+	id := idFbSource
+	if target {
+		version = selectedRestoreVersion()
+		id = idFbTarget
+	}
+	if version == "" {
+		return
+	}
+	p := chooseGbak(version)
+	if p == "" {
+		return
+	}
+	root := normalizeFBRoot(p, version)
+	setText(id, root)
+	if target {
+		setText(idTargetPort, detectFirebirdPort(root, version))
+	} else {
+		setText(idSourcePort, detectFirebirdPort(root, version))
+	}
+}
+
+func passwordEditStyle(style uint32, visible bool) uint32 {
+	if visible {
+		return style &^ ES_PASSWORD
+	}
+	return style | ES_PASSWORD
+}
+
+func applyPasswordVisibility(visible bool) {
+	h := controls[idPassword]
+	if h == 0 {
+		return
+	}
+	idx := int32(-16) // GWL_STYLE
+	styleRaw, _, _ := procGetWindowLongW.Call(uintptr(h), uintptr(uint32(idx)))
+	style := passwordEditStyle(uint32(styleRaw), visible)
+	procSetWindowLongW.Call(uintptr(h), uintptr(uint32(idx)), uintptr(style))
+
+	mask := uintptr('*')
+	if visible {
+		mask = 0
+	}
+	procSendMessageW.Call(uintptr(h), EM_SETPASSWORDCHAR, mask, 0)
+	procInvalidateRect.Call(uintptr(h), 0, 1)
+	procUpdateWindow.Call(uintptr(h))
+}
+
+func togglePassword() {
+	passwordVisible = !passwordVisible
+	if passwordVisible {
+		setText(idPasswordToggle, "Ocultar senha")
+	} else {
+		setText(idPasswordToggle, "Mostrar senha")
+	}
+	applyPasswordVisibility(passwordVisible)
+}
+
+func versionNumber(version string) float64 {
+	v, err := strconv.ParseFloat(version, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+func isBackwardMigration(sourceVersion, targetVersion string) bool {
+	if sourceVersion == "" || targetVersion == "" {
+		return false
+	}
+	return versionNumber(targetVersion) < versionNumber(sourceVersion)
+}
+
+func supportsServiceManagerRestore(version string) bool {
+	// Firebird 1.0 fica em modo local por compatibilidade maxima com instalacoes muito antigas.
+	return version != "1.0"
+}
+
+type workflowConfig struct {
+	Routine       routineDef
+	SourceVersion string
+	TargetVersion string
+	Source        string
+	Dest          string
+	BackupDir     string
+	FbSource      string
+	FbTarget      string
+	Service       string
+	SourcePort    string
+	TargetPort    string
+	User          string
+	Password      string
+	SkipData      string
+}
+
+func collectConfig() workflowConfig {
+	return workflowConfig{
+		Routine:       selectedRoutine(),
+		SourceVersion: selectedSourceVersion(),
+		TargetVersion: selectedRestoreVersion(),
+		Source:        strings.TrimSpace(getText(idSource)),
+		Dest:          strings.TrimSpace(getText(idDest)),
+		BackupDir:     strings.TrimSpace(getText(idBackupDir)),
+		FbSource:      strings.TrimSpace(getText(idFbSource)),
+		FbTarget:      strings.TrimSpace(getText(idFbTarget)),
+		Service:       strings.TrimSpace(getText(idService)),
+		SourcePort:    strings.TrimSpace(getText(idSourcePort)),
+		TargetPort:    strings.TrimSpace(getText(idTargetPort)),
+		User:          strings.TrimSpace(getText(idUser)),
+		Password:      getText(idPassword),
+		SkipData:      strings.TrimSpace(getText(idSkipData)),
+	}
+}
+
+func validateConfig(c workflowConfig) error {
+	if c.Source == "" || !fileExists(c.Source) {
+		return errors.New("selecione um arquivo de origem valido")
+	}
+	if c.User == "" {
+		return errors.New("informe o usuário do Firebird")
+	}
+	if strings.ContainsAny(c.User+c.Password, "\r\n") {
+		return errors.New("usuário ou senha contém quebra de linha inválida")
+	}
+
+	if c.Routine.Kind != routineRestore {
+		if c.FbSource == "" || !fileExists(firebirdExe(c.FbSource, c.SourceVersion, "gbak.exe")) {
+			return fmt.Errorf("não encontrei o gbak.exe do Firebird %s da rotina", c.SourceVersion)
+		}
+	}
+	if c.Routine.Kind == routineRepair || c.Routine.Kind == routineRepairAdvanced {
+		if !fileExists(firebirdExe(c.FbSource, c.SourceVersion, "gfix.exe")) {
+			return fmt.Errorf("não encontrei o gfix.exe do Firebird %s da rotina", c.SourceVersion)
+		}
+		if c.BackupDir == "" || !dirExists(c.BackupDir) {
+			return errors.New("selecione uma pasta valida para salvar o backup")
+		}
+		if _, err := strconv.Atoi(c.SourcePort); err != nil {
+			return errors.New("a porta do Firebird da rotina precisa ser numerica")
+		}
+	}
+	if c.TargetVersion != "" {
+		if c.TargetVersion == "" {
+			return errors.New("selecione a versão de restauração")
+		}
+		if c.Dest == "" {
+			return errors.New("informe o arquivo de destino")
+		}
+		if strings.EqualFold(filepath.Clean(c.Source), filepath.Clean(c.Dest)) {
+			return errors.New("o destino precisa ser diferente do arquivo de origem")
+		}
+		if c.FbTarget == "" || !fileExists(firebirdExe(c.FbTarget, c.TargetVersion, "gbak.exe")) {
+			return fmt.Errorf("não encontrei o gbak.exe do Firebird %s da restauração", c.TargetVersion)
+		}
+		if _, err := strconv.Atoi(c.TargetPort); err != nil {
+			return errors.New("a porta do Firebird da restauração precisa ser numérica")
+		}
+		if c.TargetVersion == "5.0" && !fileExists(firebirdExe(c.FbTarget, c.TargetVersion, "gfix.exe")) {
+			return errors.New("não encontrei o gfix.exe do Firebird 5.0 para ajustar o dialeto após a restauração")
+		}
+	}
+	return nil
+}
+
+func setStatus(text string) {
+	setText(idStatus, text)
+}
+
+func quoteForLog(s string) string {
+	if strings.ContainsAny(s, " \t") {
+		return `"` + s + `"`
+	}
+	return s
+}
+
+func toggleDetailedLog() {
+	if isRunning() {
+		return
+	}
+	detailedLog = !detailedLog
+	if detailedLog {
+		setText(idDetailedLog, "Detalhado: sim")
+		setStatus("Log detalhado ativado. O gbak exibira todas as etapas tecnicas.")
+	} else {
+		setText(idDetailedLog, "Detalhado: não")
+		setStatus("Log resumido ativado. O gbak exibira apenas mensagens essenciais.")
+	}
+}
+
+func effectiveCommandArgs(exe string, args []string) []string {
+	effective := append([]string(nil), args...)
+	if detailedLog || !strings.EqualFold(filepath.Base(exe), "gbak.exe") {
+		return effective
+	}
+	filtered := effective[:0]
+	for _, arg := range effective {
+		if strings.EqualFold(arg, "-v") {
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+	return filtered
+}
+
+func shouldSurfaceSummaryOutput(output string) bool {
+	lower := strings.ToLower(output)
+	for _, token := range []string{"error", "erro", "warning", "aviso", "falha", "failed", "corrupt", "invalid", "damaged"} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func runCommand(ctx context.Context, label, exe string, args ...string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	appendLog(label)
+	effectiveArgs := effectiveCommandArgs(exe, args)
+	displayArgs := append([]string(nil), effectiveArgs...)
+	for i := 0; i < len(displayArgs)-1; i++ {
+		if strings.EqualFold(displayArgs[i], "-password") || strings.EqualFold(displayArgs[i], "-pass") {
+			displayArgs[i+1] = "********"
+		}
+	}
+
+	if !detailedLog {
+		output, err := runCommandCapture(ctx, exe, effectiveArgs...)
+		if output != "" && (err != nil || shouldSurfaceSummaryOutput(output)) {
+			appendLog(output)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	}
+
+	appendLog("  " + quoteForLog(exe) + " " + strings.Join(displayArgs, " "))
+	cmd := exec.CommandContext(ctx, exe, effectiveArgs...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: CREATE_NO_WINDOW}
+
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+
+	if err := cmd.Start(); err != nil {
+		_ = pw.Close()
+		_ = pr.Close()
+		return err
+	}
+
+	scanDone := make(chan struct{})
+	go func() {
+		defer close(scanDone)
+		scanner := bufio.NewScanner(pr)
+		scanner.Buffer(make([]byte, 4096), 1024*1024)
+		for scanner.Scan() {
+			line := append([]byte(nil), scanner.Bytes()...)
+			appendLog(decodeWindowsBytes(line))
+		}
+	}()
+
+	err := cmd.Wait()
+	_ = pw.Close()
+	<-scanDone
+	_ = pr.Close()
+
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
+
+func databaseConnection(port, path string) string {
+	return "127.0.0.1/" + port + ":" + path
+}
+
+func serviceManager(port string) string {
+	if strings.TrimSpace(port) == "" || port == "3050" {
+		return "localhost:service_mgr"
+	}
+	return "localhost/" + port + ":service_mgr"
+}
+
+func backupFilePath(c workflowConfig) string {
+	base := strings.TrimSuffix(filepath.Base(c.Source), filepath.Ext(c.Source))
+	if base == "" {
+		base = "DBCOM"
+	}
+	stamp := time.Now().Format("20060102_150405")
+	return filepath.Join(c.BackupDir, base+"_"+stamp+".BAK")
+}
+
+type databaseHeader struct {
+	ODS      string
+	Dialect  string
+	PageSize string
+}
+
+func parseDatabaseHeader(output string) databaseHeader {
+	var h databaseHeader
+	for _, raw := range strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(raw)
+		lower := strings.ToLower(line)
+		switch {
+		case strings.HasPrefix(lower, "ods version"):
+			h.ODS = strings.TrimSpace(line[len("ODS version"):])
+		case strings.HasPrefix(lower, "database dialect"):
+			h.Dialect = strings.TrimSpace(line[len("Database dialect"):])
+		case strings.HasPrefix(lower, "page size"):
+			h.PageSize = strings.TrimSpace(line[len("Page size"):])
+		}
+	}
+	return h
+}
+
+func validateRestoredHeader(ctx context.Context, c workflowConfig) error {
+	gstat := firebirdExe(c.FbTarget, c.TargetVersion, "gstat.exe")
+	if !fileExists(gstat) {
+		appendLog("Banco restaurado; gstat.exe n\u00e3o foi encontrado para conferir o header.")
+		return nil
+	}
+	appendLog("Conferindo banco restaurado...")
+	output, err := runCommandCapture(ctx, gstat, "-h", c.Dest)
+	if detailedLog {
+		appendLog("  " + quoteForLog(gstat) + " -h " + quoteForLog(c.Dest))
+		if output != "" {
+			appendLog(output)
+		}
+	}
+	if err != nil {
+		if !detailedLog && output != "" {
+			appendLog(output)
+		}
+		return fmt.Errorf("falha ao conferir o banco restaurado com gstat: %w", err)
+	}
+	h := parseDatabaseHeader(output)
+	setLastHeader(h)
+	parts := []string{"\u2713 Banco restaurado validado"}
+	if h.ODS != "" {
+		parts = append(parts, "ODS "+h.ODS)
+	}
+	if h.Dialect != "" {
+		parts = append(parts, "Dialeto "+h.Dialect)
+	}
+	if h.PageSize != "" {
+		parts = append(parts, "P\u00e1gina "+h.PageSize+" bytes")
+	}
+	appendLog(strings.Join(parts, " | ") + ".")
+	return nil
+}
+
+func restoreBackup(ctx context.Context, c workflowConfig, backup string) error {
+	version := c.TargetVersion
+	gbak := firebirdExe(c.FbTarget, version, "gbak.exe")
+
+	setStatus("Restaurando para Firebird " + version + "...")
+	setProgress(68, "Restaurando backup...")
+	appendLog("Restaurando backup para Firebird " + version + ".")
+	targetPort := c.TargetPort
+	useService := supportsServiceManagerRestore(version)
+	if useService {
+		resolvedPort, err := verifyFirebirdEndpoint(ctx, "da restauração", version, c.FbTarget, "", targetPort)
+		if err != nil {
+			return err
+		}
+		targetPort = resolvedPort
+	} else {
+		appendLog("Firebird 1.0: usando restauração local por compatibilidade com instalações legadas.")
+	}
+
+	restoreAction := "-c"
+	if fileExists(c.Dest) {
+		restoreAction = "-rep"
+	}
+	restoreFlags := []string{restoreAction, "-v"}
+	var args []string
+	if useService {
+		args = append(restoreFlags, "-se", serviceManager(targetPort), "-user", c.User, "-password", c.Password, backup, c.Dest)
+	} else {
+		args = append(restoreFlags, "-user", c.User, "-password", c.Password, backup, c.Dest)
+	}
+	if err := runCommand(ctx, "Executando restauração...", gbak, args...); err != nil {
+		return fmt.Errorf("falha na restauração Firebird %s: %w", version, err)
+	}
+	if !fileExists(c.Dest) {
+		return fmt.Errorf("a restauração terminou sem criar o arquivo de destino esperado: %s", c.Dest)
+	}
+	appendLog("\u2713 Restauração concluída.")
+	setProgress(84, "Restauração concluída")
+
+	if version == "5.0" {
+		gfix := firebirdExe(c.FbTarget, version, "gfix.exe")
+		if err := runCommand(ctx, "Ajustando dialeto do banco restaurado para 1...", gfix, "-user", c.User, "-password", c.Password, "-sql_dialect", "1", c.Dest); err != nil {
+			return fmt.Errorf("restauração concluída, mas falhou o ajuste de dialeto no Firebird 5.0: %w", err)
+		}
+		appendLog("\u2713 Dialeto ajustado para 1.")
+		setProgress(91, "Dialeto ajustado")
+	}
+	setProgress(95, "Validando resultado...")
+	if err := validateRestoredHeader(ctx, c); err != nil {
+		return err
+	}
+	appendLog("Resultado final: Firebird " + version + " | " + c.Dest)
+	return nil
+}
+
+type recoveryStats struct {
+	RecordErrors      int
+	IndexErrors       int
+	TransactionErrors int
+	BlobErrors        int
+	DatabaseErrors    int
+	GenericCorruption bool
+}
+
+func (s recoveryStats) HasCorruption() bool {
+	return s.RecordErrors > 0 || s.IndexErrors > 0 || s.TransactionErrors > 0 || s.BlobErrors > 0 || s.DatabaseErrors > 0 || s.GenericCorruption
+}
+
+func (s recoveryStats) IndexOnly() bool {
+	return s.IndexErrors > 0 && s.RecordErrors == 0 && s.TransactionErrors == 0 && s.BlobErrors == 0 && s.DatabaseErrors == 0 && !s.GenericCorruption
+}
+
+func (s recoveryStats) Severity() string {
+	switch {
+	case s.RecordErrors > 0 || s.BlobErrors > 0 || s.DatabaseErrors > 0 || s.GenericCorruption:
+		return "ALTA"
+	case s.TransactionErrors > 0:
+		return "MÉDIA"
+	case s.IndexErrors > 0:
+		return "BAIXA (índices)"
+	default:
+		return "SEM CORRUPÇÃO REPORTADA"
+	}
+}
+
+func (s recoveryStats) Summary() string {
+	if !s.HasCorruption() {
+		return "nenhuma corrupção estrutural foi reportada"
+	}
+	parts := []string{"severidade " + s.Severity()}
+	if s.RecordErrors > 0 {
+		parts = append(parts, fmt.Sprintf("registros=%d", s.RecordErrors))
+	}
+	if s.IndexErrors > 0 {
+		parts = append(parts, fmt.Sprintf("índices=%d", s.IndexErrors))
+	}
+	if s.TransactionErrors > 0 {
+		parts = append(parts, fmt.Sprintf("transações=%d", s.TransactionErrors))
+	}
+	if s.BlobErrors > 0 {
+		parts = append(parts, fmt.Sprintf("BLOBs=%d", s.BlobErrors))
+	}
+	if s.DatabaseErrors > 0 {
+		parts = append(parts, fmt.Sprintf("páginas=%d", s.DatabaseErrors))
+	}
+	if s.GenericCorruption && len(parts) == 1 {
+		parts = append(parts, "erro estrutural não quantificado")
+	}
+	return strings.Join(parts, " | ")
+}
+
+func countValidationError(output, label string) int {
+	pattern := `(?im)^\s*Number of ` + regexp.QuoteMeta(label) + `\s*[:=]?\s*(\d+)\s*$`
+	re := regexp.MustCompile(pattern)
+	m := re.FindStringSubmatch(output)
+	if len(m) != 2 {
+		return 0
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n
+}
+
+func parseRecoveryStats(output string) recoveryStats {
+	stats := recoveryStats{
+		RecordErrors:      countValidationError(output, "record level errors"),
+		IndexErrors:       countValidationError(output, "index page errors"),
+		TransactionErrors: countValidationError(output, "transaction page errors"),
+		BlobErrors:        countValidationError(output, "BLOB errors"),
+		DatabaseErrors:    countValidationError(output, "database page errors"),
+	}
+	lower := strings.ToLower(output)
+	for _, token := range []string{
+		"database file appears corrupt",
+		"database corruption",
+		"corrupt data structure",
+		"wrong page type",
+		"bad checksum",
+		"checksum error",
+		"page is of wrong type",
+	} {
+		if strings.Contains(lower, token) {
+			stats.GenericCorruption = true
+			break
+		}
+	}
+	return stats
+}
+
+func mergeRecoveryStats(a, b recoveryStats) recoveryStats {
+	max := func(x, y int) int {
+		if x > y {
+			return x
+		}
+		return y
+	}
+	return recoveryStats{
+		RecordErrors:      max(a.RecordErrors, b.RecordErrors),
+		IndexErrors:       max(a.IndexErrors, b.IndexErrors),
+		TransactionErrors: max(a.TransactionErrors, b.TransactionErrors),
+		BlobErrors:        max(a.BlobErrors, b.BlobErrors),
+		DatabaseErrors:    max(a.DatabaseErrors, b.DatabaseErrors),
+		GenericCorruption: a.GenericCorruption || b.GenericCorruption,
+	}
+}
+
+func outputReportsUnknownSwitch(output string) bool {
+	lower := strings.ToLower(output)
+	for _, token := range []string{"unknown switch", "invalid switch", "unknown option", "invalid option"} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func toolOutputHasOperationalFailure(output string) bool {
+	lower := strings.ToLower(output)
+	for _, token := range []string{
+		"failed to attach",
+		"cannot attach",
+		"unable to complete network request",
+		"unavailable database",
+		"i/o error",
+		"io error",
+		"no permission for",
+		"user name and password are not defined",
+		"your user name and password are not defined",
+		"invalid database handle",
+		"database is shutdown",
+		"connection rejected",
+		"unknown switch",
+		"invalid switch",
+		"unknown option",
+		"invalid option",
+	} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func tailText(text string, maxLines int) string {
+	lines := strings.Split(strings.ReplaceAll(strings.TrimSpace(text), "\r\n", "\n"), "\n")
+	if len(lines) <= maxLines {
+		return strings.Join(lines, "\n")
+	}
+	return strings.Join(lines[len(lines)-maxLines:], "\n")
+}
+
+func setRecoveryTechnicalLog(path string) {
+	recoveryTechnicalLogMu.Lock()
+	recoveryTechnicalLog = path
+	recoveryTechnicalLogMu.Unlock()
+}
+
+func recoveryTechnicalLogPath() string {
+	recoveryTechnicalLogMu.Lock()
+	defer recoveryTechnicalLogMu.Unlock()
+	return recoveryTechnicalLog
+}
+
+func recoveryCommandArgs(exe string, args []string) []string {
+	// No fluxo avançado, o gbak sempre mantém -v internamente para que seja
+	// possível identificar a última relação processada e o erro real. O painel
+	// continua resumido; a saída completa fica em LOG_TECNICO_RECUPERACAO.txt.
+	return append([]string(nil), args...)
+}
+
+func maskedCommandForLog(exe string, args []string) string {
+	displayArgs := append([]string(nil), args...)
+	for i := 0; i < len(displayArgs)-1; i++ {
+		if strings.EqualFold(displayArgs[i], "-password") || strings.EqualFold(displayArgs[i], "-pass") {
+			displayArgs[i+1] = "********"
+		}
+	}
+	return quoteForLog(exe) + " " + strings.Join(displayArgs, " ")
+}
+
+func runRecoveryCapture(ctx context.Context, label, exe string, args ...string) (string, error) {
+	appendLog(label)
+	effectiveArgs := recoveryCommandArgs(exe, args)
+	if detailedLog {
+		appendLog("  " + maskedCommandForLog(exe, effectiveArgs))
+	}
+
+	var techFile *os.File
+	var techWriter *bufio.Writer
+	if techPath := recoveryTechnicalLogPath(); techPath != "" {
+		if f, err := os.OpenFile(techPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); err == nil {
+			techFile = f
+			techWriter = bufio.NewWriterSize(f, 64*1024)
+		}
+	}
+	writeTech := func(text string) {
+		if techWriter == nil {
+			return
+		}
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return
+		}
+		stamp := time.Now().Format("15:04:05")
+		for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+			_, _ = fmt.Fprintf(techWriter, "[%s] %s\r\n", stamp, line)
+		}
+	}
+	closeTech := func() {
+		if techWriter != nil {
+			_ = techWriter.Flush()
+		}
+		if techFile != nil {
+			_ = techFile.Close()
+		}
+	}
+	writeTech(label)
+	writeTech("COMANDO: " + maskedCommandForLog(exe, effectiveArgs))
+
+	cmd := exec.CommandContext(ctx, exe, effectiveArgs...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: CREATE_NO_WINDOW}
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+	if err := cmd.Start(); err != nil {
+		_ = pw.Close()
+		_ = pr.Close()
+		writeTech("ERRO AO INICIAR: " + err.Error())
+		closeTech()
+		return "", err
+	}
+
+	maxCapturedLines := 2000
+	if strings.EqualFold(filepath.Base(exe), "gbak.exe") {
+		maxCapturedLines = 1200
+	}
+	captured := make([]string, 0, minInt(maxCapturedLines, 256))
+	scanDone := make(chan struct{})
+	go func() {
+		defer close(scanDone)
+		scanner := bufio.NewScanner(pr)
+		scanner.Buffer(make([]byte, 4096), 1024*1024)
+		for scanner.Scan() {
+			line := decodeWindowsBytes(append([]byte(nil), scanner.Bytes()...))
+			writeTech(line)
+			if detailedLog {
+				appendLog(line)
+			}
+			captured = append(captured, line)
+			if len(captured) > maxCapturedLines {
+				copy(captured, captured[len(captured)-maxCapturedLines:])
+				captured = captured[:maxCapturedLines]
+			}
+		}
+	}()
+	err := cmd.Wait()
+	_ = pw.Close()
+	<-scanDone
+	_ = pr.Close()
+	output := strings.Join(captured, "\n")
+	if err != nil {
+		writeTech("PROCESSO FINALIZADO COM ERRO: " + err.Error())
+	} else {
+		writeTech("PROCESSO FINALIZADO COM SUCESSO")
+	}
+	closeTech()
+	if ctx.Err() != nil {
+		return output, ctx.Err()
+	}
+	return output, err
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+type firebirdLogSnapshot struct {
+	Path   string
+	Offset int64
+}
+
+func firebirdLogPath(root string) string {
+	root = strings.TrimRight(strings.TrimSpace(root), `\\/`)
+	if strings.EqualFold(filepath.Base(root), "bin") {
+		root = filepath.Dir(root)
+	}
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, "firebird.log")
+}
+
+func snapshotFirebirdLog(root string) firebirdLogSnapshot {
+	path := firebirdLogPath(root)
+	if path == "" {
+		return firebirdLogSnapshot{}
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return firebirdLogSnapshot{Path: path}
+	}
+	return firebirdLogSnapshot{Path: path, Offset: st.Size()}
+}
+
+func collectFirebirdLogDelta(snap firebirdLogSnapshot) string {
+	if snap.Path == "" {
+		return ""
+	}
+	f, err := os.Open(snap.Path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.Size() == 0 {
+		return ""
+	}
+	start := snap.Offset
+	if start < 0 || start > st.Size() {
+		start = 0
+	}
+	const maxBytes int64 = 128 * 1024
+	if st.Size()-start > maxBytes {
+		start = st.Size() - maxBytes
+	}
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		return ""
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes))
+	if err != nil {
+		return ""
+	}
+	text := strings.TrimSpace(decodeWindowsBytes(data))
+	if text == "" {
+		return ""
+	}
+	return tailText(text, 100)
+}
+
+func normalizeRelationName(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, "`'\\\"")
+	value = strings.TrimRight(value, ".,;:")
+	return strings.TrimSpace(value)
+}
+
+func plausibleRelationName(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	switch strings.ToUpper(name) {
+	case "IS", "WAS", "NOT", "FOR", "DATA", "NAME", "WITH", "FROM", "THE", "A", "AN":
+		return false
+	}
+	return true
+}
+
+func suspectedRelationFromGbak(output string) string {
+	lines := strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n")
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\b(?:writing|restoring|processing|backing up)\s+(?:data\s+)?(?:for\s+)?table\s+("[^"]+"|[A-Za-z0-9_$]+)`),
+		regexp.MustCompile(`(?i)\brelation\s+("[^"]+"|[A-Za-z0-9_$]+)`),
+		regexp.MustCompile(`(?i)\btable\s+("[^"]+"|[A-Za-z0-9_$]+)`),
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		for _, re := range patterns {
+			m := re.FindStringSubmatch(line)
+			if len(m) == 2 {
+				name := normalizeRelationName(m[1])
+				if plausibleRelationName(name) {
+					return name
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func safeRelationForSkip(name string) bool {
+	name = strings.ToUpper(strings.TrimSpace(name))
+	if name == "" {
+		return false
+	}
+	for _, prefix := range []string{"RDB$", "MON$", "SEC$"} {
+		if strings.HasPrefix(name, prefix) {
+			return false
+		}
+	}
+	return true
+}
+
+func sqlRegexLiteral(name string) string {
+	name = normalizeRelationName(name)
+	var b strings.Builder
+	for _, r := range name {
+		switch r {
+		case '_':
+			b.WriteString("[_]")
+		case '%':
+			b.WriteString("[%]")
+		case '[', ']', '(', ')', '|', '*', '+', '?', '{', '}', '^', '$', '.', '\\':
+			b.WriteByte('[')
+			b.WriteRune(r)
+			b.WriteByte(']')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func relevantGbakFailureLines(output string, maxLines int) string {
+	lines := strings.Split(strings.ReplaceAll(strings.TrimSpace(output), "\r\n", "\n"), "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	isRelevant := func(line string) bool {
+		lower := strings.ToLower(line)
+		for _, token := range []string{
+			"error", "erro", "failed", "falha", "corrupt", "damaged", "malformed",
+			"wrong page", "checksum", "cannot", "can't", "unable", "unexpected",
+			"table ", "relation ", "writing data", "restoring data", "record",
+		} {
+			if strings.Contains(lower, token) {
+				return true
+			}
+		}
+		return false
+	}
+	selected := make([]string, 0, maxLines)
+	startTail := len(lines) - 18
+	if startTail < 0 {
+		startTail = 0
+	}
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if isRelevant(line) || i >= startTail {
+			selected = append(selected, line)
+		}
+	}
+	if len(selected) > maxLines {
+		selected = selected[len(selected)-maxLines:]
+	}
+	return strings.Join(selected, "\n")
+}
+
+func gbakLooksLikeIndexCorruption(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "expected index b-tree") ||
+		(strings.Contains(lower, "wrong page type") && strings.Contains(lower, "index")) ||
+		strings.Contains(lower, "index page errors")
+}
+
+func metadataBackupPath(backup string) string {
+	ext := filepath.Ext(backup)
+	base := strings.TrimSuffix(backup, ext)
+	if ext == "" {
+		ext = ".BAK"
+	}
+	return base + "_METADATA" + ext
+}
+
+func metadataBackupArgs(c workflowConfig, dbConn, backup string) []string {
+	return []string{"-b", "-v", "-m", "-user", c.User, "-pass", c.Password, dbConn, backup}
+}
+
+type relationColumn struct {
+	Name         string
+	HasArray     bool
+	Generated    bool
+	FieldType    int
+	FieldSubType int
+}
+
+type relationMetadata struct {
+	Name              string
+	Columns           []relationColumn
+	PrimaryKey        string
+	PrimaryIndex      string
+	PrimaryType       int
+	PrimaryScale      int
+	ActiveIndexes     []string
+	ConstraintIndexes []string
+	ActiveTriggers    []string
+}
+
+type rowRescueResult struct {
+	Attempted bool
+	Complete  bool
+	Recovered int64
+	LostKeys  []string
+	StagePath string
+	Backup    string
+}
+
+func sqlStringLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+func sqlIdentifier(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+}
+
+func writeRecoveryTechLine(text string) {
+	path := recoveryTechnicalLogPath()
+	if path == "" || strings.TrimSpace(text) == "" {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	stamp := time.Now().Format("15:04:05")
+	for _, line := range strings.Split(strings.ReplaceAll(strings.TrimSpace(text), "\r\n", "\n"), "\n") {
+		_, _ = fmt.Fprintf(f, "[%s] %s\r\n", stamp, line)
+	}
+}
+
+func runISQLScript(ctx context.Context, root, version, port, user, password, dbPath, label, script string) (string, error) {
+	isql := firebirdExe(root, version, "isql.exe")
+	if !fileExists(isql) {
+		return "", fmt.Errorf("não encontrei isql.exe do Firebird %s", version)
+	}
+	dbConn := databaseConnection(port, dbPath)
+	if detailedLog {
+		appendLog(label)
+	}
+	writeRecoveryTechLine(label)
+	writeRecoveryTechLine("ISQL: " + quoteForLog(isql) + " -user " + user + " -password ******** " + dbConn)
+
+	cmd := exec.CommandContext(ctx, isql, "-user", user, "-password", password, dbConn)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: CREATE_NO_WINDOW}
+	cmd.Stdin = strings.NewReader(script)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
+	text := strings.TrimSpace(decodeWindowsBytes(out.Bytes()))
+	if err == nil && isqlOutputHasFailure(text) {
+		err = errors.New("isql reportou falha na execução do SQL")
+	}
+	if text != "" {
+		writeRecoveryTechLine(text)
+		if detailedLog {
+			appendLog(text)
+		}
+	}
+	if err != nil {
+		writeRecoveryTechLine("ISQL FINALIZADO COM ERRO: " + err.Error())
+	} else {
+		writeRecoveryTechLine("ISQL FINALIZADO COM SUCESSO")
+	}
+	if ctx.Err() != nil {
+		return text, ctx.Err()
+	}
+	return text, err
+}
+
+func isqlOutputHasFailure(output string) bool {
+	lower := strings.ToLower(output)
+	for _, token := range []string{
+		"statement failed, sqlstate",
+		"dynamic sql error",
+		"sql error code",
+		"unsuccessful metadata update",
+		"attempt to store duplicate value",
+		"validation error for column",
+		"violation of primary or unique key constraint",
+		"violation of foreign key constraint",
+		"database file appears corrupt",
+		"wrong page type",
+		"page is of wrong type",
+		"error: unable to complete network request",
+	} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func markerLines(output, prefix string) []string {
+	var result []string
+	for _, raw := range strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(raw)
+		if idx := strings.Index(line, prefix); idx >= 0 {
+			result = append(result, strings.TrimSpace(line[idx+len(prefix):]))
+		}
+	}
+	return result
+}
+
+func relationMetadataScript(relation string) string {
+	rel := sqlStringLiteral(relation)
+	return "SET HEADING OFF;\nSET LIST OFF;\nSET COUNT OFF;\n" +
+		"SELECT 'FTB_COL|' || TRIM(rf.RDB$FIELD_NAME) || '|' || CAST(COALESCE(f.RDB$DIMENSIONS, 0) AS VARCHAR(10)) || '|' || CASE WHEN rf.RDB$GENERATOR_NAME IS NULL THEN '0' ELSE '1' END || '|' || CAST(f.RDB$FIELD_TYPE AS VARCHAR(10)) || '|' || CAST(COALESCE(f.RDB$FIELD_SUB_TYPE, 0) AS VARCHAR(10)) " +
+		"FROM RDB$RELATION_FIELDS rf JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE " +
+		"WHERE rf.RDB$RELATION_NAME = " + rel + " AND COALESCE(rf.RDB$UPDATE_FLAG, 1) = 1 AND f.RDB$COMPUTED_BLR IS NULL ORDER BY rf.RDB$FIELD_POSITION;\n" +
+		"SELECT 'FTB_PK|' || TRIM(s.RDB$FIELD_NAME) || '|' || TRIM(rc.RDB$INDEX_NAME) || '|' || CAST(f.RDB$FIELD_TYPE AS VARCHAR(10)) || '|' || CAST(COALESCE(f.RDB$FIELD_SCALE,0) AS VARCHAR(10)) " +
+		"FROM RDB$RELATION_CONSTRAINTS rc JOIN RDB$INDEX_SEGMENTS s ON s.RDB$INDEX_NAME = rc.RDB$INDEX_NAME " +
+		"JOIN RDB$RELATION_FIELDS rf ON rf.RDB$RELATION_NAME = rc.RDB$RELATION_NAME AND rf.RDB$FIELD_NAME = s.RDB$FIELD_NAME " +
+		"JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE WHERE rc.RDB$RELATION_NAME = " + rel + " AND rc.RDB$CONSTRAINT_TYPE = 'PRIMARY KEY' ORDER BY s.RDB$FIELD_POSITION;\n" +
+		"SELECT 'FTB_IDX|' || TRIM(i.RDB$INDEX_NAME) FROM RDB$INDICES i WHERE i.RDB$RELATION_NAME = " + rel + " AND COALESCE(i.RDB$SYSTEM_FLAG,0) = 0 AND COALESCE(i.RDB$INDEX_INACTIVE,0) = 0 ORDER BY i.RDB$INDEX_NAME;\n" +
+		"SELECT 'FTB_CIDX|' || TRIM(rc.RDB$INDEX_NAME) FROM RDB$RELATION_CONSTRAINTS rc WHERE rc.RDB$RELATION_NAME = " + rel + " AND rc.RDB$INDEX_NAME IS NOT NULL ORDER BY rc.RDB$INDEX_NAME;\n" +
+		"SELECT 'FTB_TRG|' || TRIM(t.RDB$TRIGGER_NAME) FROM RDB$TRIGGERS t WHERE t.RDB$RELATION_NAME = " + rel + " AND COALESCE(t.RDB$SYSTEM_FLAG,0) = 0 AND COALESCE(t.RDB$TRIGGER_INACTIVE,0) = 0 ORDER BY t.RDB$TRIGGER_NAME;\nQUIT;\n"
+}
+
+func loadRelationMetadataAt(ctx context.Context, root, version, port, user, password, dbPath, relation string) (relationMetadata, error) {
+	out, err := runISQLScript(ctx, root, version, port, user, password, dbPath, "Lendo metadados da relação "+relation+"...", relationMetadataScript(relation))
+	if err != nil {
+		return relationMetadata{}, err
+	}
+	meta := relationMetadata{Name: relation}
+	for _, item := range markerLines(out, "FTB_COL|") {
+		parts := strings.Split(item, "|")
+		if len(parts) < 3 {
+			continue
+		}
+		fieldType, fieldSubType := 0, 0
+		if len(parts) >= 4 {
+			fieldType, _ = strconv.Atoi(strings.TrimSpace(parts[3]))
+		}
+		if len(parts) >= 5 {
+			fieldSubType, _ = strconv.Atoi(strings.TrimSpace(parts[4]))
+		}
+		meta.Columns = append(meta.Columns, relationColumn{
+			Name: strings.TrimSpace(parts[0]), HasArray: strings.TrimSpace(parts[1]) != "0", Generated: strings.TrimSpace(parts[2]) == "1",
+			FieldType: fieldType, FieldSubType: fieldSubType,
+		})
+	}
+	pkLines := markerLines(out, "FTB_PK|")
+	if len(pkLines) == 1 {
+		parts := strings.Split(pkLines[0], "|")
+		if len(parts) >= 4 {
+			meta.PrimaryKey = strings.TrimSpace(parts[0])
+			meta.PrimaryIndex = strings.TrimSpace(parts[1])
+			meta.PrimaryType, _ = strconv.Atoi(strings.TrimSpace(parts[2]))
+			meta.PrimaryScale, _ = strconv.Atoi(strings.TrimSpace(parts[3]))
+		}
+	}
+	meta.ActiveIndexes = markerLines(out, "FTB_IDX|")
+	meta.ConstraintIndexes = markerLines(out, "FTB_CIDX|")
+	meta.ActiveTriggers = markerLines(out, "FTB_TRG|")
+	if len(meta.Columns) == 0 {
+		return meta, fmt.Errorf("não foi possível obter as colunas da relação %s", relation)
+	}
+	return meta, nil
+}
+
+func loadRelationMetadata(ctx context.Context, c workflowConfig, port, dbPath, relation string) (relationMetadata, error) {
+	return loadRelationMetadataAt(ctx, c.FbSource, c.SourceVersion, port, c.User, c.Password, dbPath, relation)
+}
+
+func integerPrimaryKey(meta relationMetadata) bool {
+	if meta.PrimaryKey == "" || meta.PrimaryScale != 0 {
+		return false
+	}
+	switch meta.PrimaryType {
+	case 7, 8, 16, 26:
+		return true
+	default:
+		return false
+	}
+}
+
+func hasUnsupportedArray(meta relationMetadata) bool {
+	for _, col := range meta.Columns {
+		if col.HasArray {
+			return true
+		}
+	}
+	return false
+}
+
+func buildAlterIndexesScript(indexes []string, active bool) string {
+	if len(indexes) == 0 {
+		return "QUIT;\n"
+	}
+	state := "INACTIVE"
+	if active {
+		state = "ACTIVE"
+	}
+	var b strings.Builder
+	b.WriteString("SET BAIL OFF;\n")
+	for _, index := range indexes {
+		b.WriteString("ALTER INDEX " + sqlIdentifier(index) + " " + state + ";\nCOMMIT;\n")
+	}
+	b.WriteString("QUIT;\n")
+	return b.String()
+}
+
+func deactivateRelationIndexes(ctx context.Context, c workflowConfig, port, dbPath string, meta relationMetadata) []string {
+	constraint := make(map[string]bool, len(meta.ConstraintIndexes))
+	for _, index := range meta.ConstraintIndexes {
+		constraint[strings.ToUpper(strings.TrimSpace(index))] = true
+	}
+	var disabled []string
+	for _, index := range meta.ActiveIndexes {
+		if constraint[strings.ToUpper(strings.TrimSpace(index))] {
+			continue
+		}
+		script := "SET BAIL ON;\nALTER INDEX " + sqlIdentifier(index) + " INACTIVE;\nCOMMIT;\nQUIT;\n"
+		if _, err := runISQLScript(ctx, c.FbSource, c.SourceVersion, port, c.User, c.Password, dbPath, "Tentando desativar índice "+index+" somente na cópia...", script); err == nil {
+			disabled = append(disabled, index)
+		}
+	}
+	return disabled
+}
+
+func salvageEngineConfig(c workflowConfig) (version, root, port string) {
+	// O banco temporário de resgate sempre usa a mesma engine da origem.
+	// Isso evita que uma migração regressiva interfira no salvamento dos dados:
+	// primeiro recuperamos o máximo possível na versão que consegue abrir o banco
+	// danificado e somente depois testamos/restauramos na versão de destino.
+	return c.SourceVersion, c.FbSource, c.SourcePort
+}
+
+func runStageISQL(ctx context.Context, c workflowConfig, dbPath, label, script string) (string, error) {
+	version, root, port := salvageEngineConfig(c)
+	resolved := port
+	if supportsServiceManagerRestore(version) {
+		p, err := verifyFirebirdEndpoint(ctx, "do resgate de registros", version, root, "", port)
+		if err != nil {
+			return "", err
+		}
+		resolved = p
+	}
+	return runISQLScript(ctx, root, version, resolved, c.User, c.Password, dbPath, label, script)
+}
+
+func restoreBackupToPath(ctx context.Context, c workflowConfig, backup, dest, label string) error {
+	version, root, port := salvageEngineConfig(c)
+	gbak := firebirdExe(root, version, "gbak.exe")
+	if !fileExists(gbak) {
+		return fmt.Errorf("não encontrei gbak.exe do Firebird %s", version)
+	}
+	resolved := port
+	if supportsServiceManagerRestore(version) {
+		p, err := verifyFirebirdEndpoint(ctx, "do resgate de registros", version, root, "", port)
+		if err != nil {
+			return err
+		}
+		resolved = p
+	}
+	_ = os.Remove(dest)
+	_, err := runRecoveryCapture(ctx, label, gbak, restoreTestArgs(version, resolved, c.User, c.Password, backup, dest, false)...)
+	if err != nil {
+		return err
+	}
+	if !fileExists(dest) {
+		return fmt.Errorf("a restauração de apoio terminou sem criar %s", dest)
+	}
+	return nil
+}
+
+func backupDatabasePath(ctx context.Context, c workflowConfig, dbPath, backup, label string) error {
+	version, root, port := salvageEngineConfig(c)
+	gbak := firebirdExe(root, version, "gbak.exe")
+	if !fileExists(gbak) {
+		return fmt.Errorf("não encontrei gbak.exe do Firebird %s", version)
+	}
+	resolved := port
+	if supportsServiceManagerRestore(version) {
+		p, err := verifyFirebirdEndpoint(ctx, "do backup pós-resgate", version, root, "", port)
+		if err != nil {
+			return err
+		}
+		resolved = p
+	}
+	_ = os.Remove(backup)
+	dbConn := databaseConnection(resolved, dbPath)
+	_, err := runRecoveryCapture(ctx, label, gbak, "-b", "-v", "-user", c.User, "-pass", c.Password, dbConn, backup)
+	if err != nil {
+		return err
+	}
+	if !fileExists(backup) {
+		return fmt.Errorf("o backup pós-resgate não foi criado: %s", backup)
+	}
+	return nil
+}
+
+func stagingPathForRecovery(backup, relation string) string {
+	ext := filepath.Ext(backup)
+	base := strings.TrimSuffix(backup, ext)
+	return base + "_SALVAGE_" + sanitizeFilePart(relation) + ".FDB"
+}
+
+func sanitizeFilePart(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "TABLE"
+	}
+	var b strings.Builder
+	for _, r := range value {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
+}
+
+func recoveredBackupPath(backup string) string {
+	ext := filepath.Ext(backup)
+	base := strings.TrimSuffix(backup, ext)
+	if ext == "" {
+		ext = ".BAK"
+	}
+	return base + "_COM_ITENS" + ext
+}
+
+func basePartialBackupPath(backup, relation string) string {
+	ext := filepath.Ext(backup)
+	base := strings.TrimSuffix(backup, ext)
+	if ext == "" {
+		ext = ".BAK"
+	}
+	return base + "_SEM_" + sanitizeFilePart(relation) + ext
+}
+
+func externalDataSource(c workflowConfig, stagePath string) string {
+	version, root, port := salvageEngineConfig(c)
+	if !portReachable(port) {
+		if detected := detectFirebirdPort(root, version); detected != "" {
+			port = detected
+		}
+	}
+	if strings.TrimSpace(port) == "" || port == "3050" {
+		return "127.0.0.1:" + stagePath
+	}
+	return "127.0.0.1/" + port + ":" + stagePath
+}
+
+func copyRelationBlock(meta relationMetadata, c workflowConfig, stagePath string, whereClause string, natural bool) (string, error) {
+	if len(meta.Columns) == 0 {
+		return "", errors.New("relação sem colunas copiáveis")
+	}
+	if hasUnsupportedArray(meta) {
+		return "", errors.New("a relação possui coluna ARRAY; o resgate automático de registros não suporta ARRAY")
+	}
+	var decls, vars, cols, placeholders []string
+	for i, col := range meta.Columns {
+		v := fmt.Sprintf("V%d", i+1)
+		decls = append(decls, "DECLARE VARIABLE "+v+" TYPE OF COLUMN "+sqlIdentifier(meta.Name)+"."+sqlIdentifier(col.Name)+";")
+		vars = append(vars, ":"+v)
+		cols = append(cols, sqlIdentifier(col.Name))
+		placeholders = append(placeholders, "?")
+	}
+	insertSQL := "INSERT INTO " + sqlIdentifier(meta.Name) + " (" + strings.Join(cols, ", ") + ") VALUES (" + strings.Join(placeholders, ", ") + ")"
+	if len(insertSQL) > 30000 {
+		return "", errors.New("a instrução de cópia excede o limite seguro do EXECUTE STATEMENT")
+	}
+	selectSQL := "SELECT " + strings.Join(cols, ", ") + " FROM " + sqlIdentifier(meta.Name) + " T"
+	if strings.TrimSpace(whereClause) != "" {
+		selectSQL += " WHERE " + whereClause
+	}
+	if natural {
+		selectSQL += " PLAN (T NATURAL)"
+	}
+
+	var b strings.Builder
+	b.WriteString("SET BAIL ON;\nSET TERM ^;\nEXECUTE BLOCK RETURNS (FTB_RESULT VARCHAR(80)) AS\n")
+	for _, decl := range decls {
+		b.WriteString(decl + "\n")
+	}
+	b.WriteString("DECLARE VARIABLE N BIGINT;\nBEGIN\n  N = 0;\n")
+	b.WriteString("  FOR " + selectSQL + " INTO " + strings.Join(vars, ", ") + " DO\n  BEGIN\n")
+	b.WriteString("    EXECUTE STATEMENT (" + sqlStringLiteral(insertSQL) + ") (" + strings.Join(vars, ", ") + ")\n")
+	b.WriteString("      ON EXTERNAL DATA SOURCE " + sqlStringLiteral(externalDataSource(c, stagePath)) + " AS USER " + sqlStringLiteral(c.User) + " PASSWORD " + sqlStringLiteral(c.Password) + " WITH COMMON TRANSACTION;\n")
+	b.WriteString("    N = N + 1;\n  END\n  FTB_RESULT = 'FTB_ROWS=' || CAST(N AS VARCHAR(30));\n  SUSPEND;\nEND^\nSET TERM ;^\nCOMMIT;\nQUIT;\n")
+	return b.String(), nil
+}
+
+func parseRecoveredRows(output string) int64 {
+	re := regexp.MustCompile(`(?i)FTB_ROWS\s*=\s*(\d+)`)
+	m := re.FindStringSubmatch(output)
+	if len(m) != 2 {
+		return 0
+	}
+	n, _ := strconv.ParseInt(m[1], 10, 64)
+	return n
+}
+
+func clearRelationOnStage(ctx context.Context, c workflowConfig, relation string, stagePath string) error {
+	script := "SET BAIL ON;\nDELETE FROM " + sqlIdentifier(relation) + ";\nCOMMIT;\nQUIT;\n"
+	_, err := runStageISQL(ctx, c, stagePath, "Limpando a relação temporária antes de nova tentativa...", script)
+	return err
+}
+
+func disableStageTriggers(ctx context.Context, c workflowConfig, stagePath string, triggers []string) error {
+	if len(triggers) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString("SET BAIL ON;\n")
+	for _, name := range triggers {
+		b.WriteString("ALTER TRIGGER " + sqlIdentifier(name) + " INACTIVE;\n")
+	}
+	b.WriteString("COMMIT;\nQUIT;\n")
+	_, err := runStageISQL(ctx, c, stagePath, "Desativando temporariamente triggers da relação no banco de resgate...", b.String())
+	return err
+}
+
+func enableStageTriggers(ctx context.Context, c workflowConfig, stagePath string, triggers []string) error {
+	if len(triggers) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString("SET BAIL ON;\n")
+	for _, name := range triggers {
+		b.WriteString("ALTER TRIGGER " + sqlIdentifier(name) + " ACTIVE;\n")
+	}
+	b.WriteString("COMMIT;\nQUIT;\n")
+	_, err := runStageISQL(ctx, c, stagePath, "Reativando triggers da relação no banco de resgate...", b.String())
+	return err
+}
+
+func primaryKeyBounds(ctx context.Context, c workflowConfig, port, workingPath string, meta relationMetadata) (int64, int64, error) {
+	if !integerPrimaryKey(meta) {
+		return 0, 0, errors.New("a relação não possui chave primária numérica simples para isolamento por faixas")
+	}
+	pk := sqlIdentifier(meta.PrimaryKey)
+	script := "SET HEADING OFF;\nSET LIST OFF;\nSET COUNT OFF;\nSELECT 'FTB_MIN=' || CAST(MIN(" + pk + ") AS VARCHAR(40)) || '|FTB_MAX=' || CAST(MAX(" + pk + ") AS VARCHAR(40)) FROM " + sqlIdentifier(meta.Name) + ";\nQUIT;\n"
+	out, err := runISQLScript(ctx, c.FbSource, c.SourceVersion, port, c.User, c.Password, workingPath, "Determinando faixa da chave primária para resgate seletivo...", script)
+	if err != nil {
+		return 0, 0, err
+	}
+	re := regexp.MustCompile(`FTB_MIN=\s*(-?\d+)\|FTB_MAX=\s*(-?\d+)`)
+	m := re.FindStringSubmatch(out)
+	if len(m) != 3 {
+		return 0, 0, errors.New("não foi possível determinar os limites da chave primária")
+	}
+	minValue, err1 := strconv.ParseInt(strings.TrimSpace(m[1]), 10, 64)
+	maxValue, err2 := strconv.ParseInt(strings.TrimSpace(m[2]), 10, 64)
+	if err1 != nil || err2 != nil {
+		return 0, 0, errors.New("limites da chave primária inválidos")
+	}
+	return minValue, maxValue, nil
+}
+
+func copyRelationRange(ctx context.Context, c workflowConfig, port, workingPath, stagePath string, meta relationMetadata, low, high int64) (int64, error) {
+	where := fmt.Sprintf("%s BETWEEN %d AND %d", sqlIdentifier(meta.PrimaryKey), low, high)
+	script, err := copyRelationBlock(meta, c, stagePath, where, false)
+	if err != nil {
+		return 0, err
+	}
+	out, err := runISQLScript(ctx, c.FbSource, c.SourceVersion, port, c.User, c.Password, workingPath, fmt.Sprintf("Resgatando %s pela chave %d..%d...", meta.Name, low, high), script)
+	if err != nil {
+		return 0, err
+	}
+	return parseRecoveredRows(out), nil
+}
+
+func rescueRanges(ctx context.Context, c workflowConfig, port, workingPath, stagePath string, meta relationMetadata, low, high int64, attempts *int, maxAttempts int) (int64, []string, error) {
+	if low > high {
+		return 0, nil, nil
+	}
+	if *attempts >= maxAttempts {
+		return 0, nil, fmt.Errorf("limite de %d tentativas atingido no isolamento de registros", maxAttempts)
+	}
+	(*attempts)++
+	rows, err := copyRelationRange(ctx, c, port, workingPath, stagePath, meta, low, high)
+	if err == nil {
+		return rows, nil, nil
+	}
+	if low == high {
+		writeRecoveryTechLine(fmt.Sprintf("CHAVE NÃO RECUPERADA: %s=%d | %v", meta.PrimaryKey, low, err))
+		return 0, []string{fmt.Sprintf("%s=%d", meta.PrimaryKey, low)}, nil
+	}
+	mid := low + (high-low)/2
+	leftRows, leftLost, leftErr := rescueRanges(ctx, c, port, workingPath, stagePath, meta, low, mid, attempts, maxAttempts)
+	if leftErr != nil {
+		return leftRows, leftLost, leftErr
+	}
+	rightRows, rightLost, rightErr := rescueRanges(ctx, c, port, workingPath, stagePath, meta, mid+1, high, attempts, maxAttempts)
+	return leftRows + rightRows, append(leftLost, rightLost...), rightErr
+}
+
+func attemptRowRescue(ctx context.Context, c workflowConfig, sourcePort, workingPath, baseBackup, finalBackup, relation string, indexesToReactivate []string) (rowRescueResult, error) {
+	result := rowRescueResult{Attempted: true}
+	if versionNumber(c.SourceVersion) < 2.5 {
+		return result, errors.New("resgate de registros exige Firebird 2.5 ou superior por usar conexão externa parametrizada")
+	}
+	meta, err := loadRelationMetadata(ctx, c, sourcePort, workingPath, relation)
+	if err != nil {
+		return result, err
+	}
+	if hasUnsupportedArray(meta) {
+		return result, errors.New("a relação possui ARRAY e não pode ser copiada automaticamente com segurança")
+	}
+	stagePath := stagingPathForRecovery(baseBackup, relation)
+	result.StagePath = stagePath
+	if err := restoreBackupToPath(ctx, c, baseBackup, stagePath, "Criando banco temporário para recuperar os registros de "+relation+"..."); err != nil {
+		return result, fmt.Errorf("não foi possível criar banco temporário de resgate: %w", err)
+	}
+	if err := disableStageTriggers(ctx, c, stagePath, meta.ActiveTriggers); err != nil {
+		return result, fmt.Errorf("não foi possível desativar os triggers da relação no banco temporário: %w", err)
+	}
+	triggersToRestore := append([]string(nil), meta.ActiveTriggers...)
+	defer func() {
+		_ = enableStageTriggers(context.Background(), c, stagePath, triggersToRestore)
+	}()
+
+	fullScript, err := copyRelationBlock(meta, c, stagePath, "", true)
+	if err != nil {
+		return result, err
+	}
+	appendLog("Tentando recuperar todos os registros legíveis de " + relation + " por leitura NATURAL...")
+	out, fullErr := runISQLScript(ctx, c.FbSource, c.SourceVersion, sourcePort, c.User, c.Password, workingPath, "Resgatando registros de "+relation+" sem usar índices...", fullScript)
+	if fullErr == nil {
+		result.Recovered = parseRecoveredRows(out)
+		result.Complete = true
+	} else {
+		appendLog("A leitura NATURAL completa falhou; tentando isolar registros pela chave primária.")
+		if err := clearRelationOnStage(ctx, c, relation, stagePath); err != nil {
+			return result, fmt.Errorf("falha ao limpar o banco temporário antes do isolamento: %w", err)
+		}
+		minValue, maxValue, boundsErr := primaryKeyBounds(ctx, c, sourcePort, workingPath, meta)
+		if boundsErr != nil {
+			return result, fmt.Errorf("não foi possível iniciar o isolamento por chave primária: %w", boundsErr)
+		}
+		attempts := 0
+		rows, lost, rangeErr := rescueRanges(ctx, c, sourcePort, workingPath, stagePath, meta, minValue, maxValue, &attempts, 512)
+		if rangeErr != nil {
+			return result, rangeErr
+		}
+		result.Recovered = rows
+		result.LostKeys = lost
+		result.Complete = len(lost) == 0
+	}
+
+	if err := enableStageTriggers(ctx, c, stagePath, triggersToRestore); err != nil {
+		return result, fmt.Errorf("os registros foram copiados, mas não foi possível reativar os triggers: %w", err)
+	}
+	triggersToRestore = nil
+	if len(indexesToReactivate) > 0 {
+		if _, err := runStageISQL(ctx, c, stagePath, "Reconstruindo índices no banco temporário após o resgate...", buildAlterIndexesScript(indexesToReactivate, true)); err != nil {
+			return result, fmt.Errorf("os registros foram copiados, mas não foi possível reconstruir os índices no banco temporário: %w", err)
+		}
+	}
+
+	newBackup := finalBackup
+	if strings.TrimSpace(newBackup) == "" || strings.EqualFold(filepath.Clean(newBackup), filepath.Clean(baseBackup)) {
+		newBackup = recoveredBackupPath(baseBackup)
+	}
+	if err := backupDatabasePath(ctx, c, stagePath, newBackup, "Gerando novo backup com os registros recuperados..."); err != nil {
+		return result, fmt.Errorf("falha ao gerar backup pós-resgate: %w", err)
+	}
+	result.Backup = newBackup
+	return result, nil
+}
+
+func recoveryStatsComparison(before, after recoveryStats) string {
+	return fmt.Sprintf(
+		"Antes: registros=%d | índices=%d | transações=%d | BLOBs=%d | páginas=%d\nDepois: registros=%d | índices=%d | transações=%d | BLOBs=%d | páginas=%d",
+		before.RecordErrors, before.IndexErrors, before.TransactionErrors, before.BlobErrors, before.DatabaseErrors,
+		after.RecordErrors, after.IndexErrors, after.TransactionErrors, after.BlobErrors, after.DatabaseErrors,
+	)
+}
+
+func fileSHA256(path string) (string, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return "", n, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), n, nil
+}
+
+func fileCopyWithSHA256(source, dest string) (string, int64, error) {
+	in, err := os.Open(source)
+	if err != nil {
+		return "", 0, err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
+		return "", 0, err
+	}
+	out, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return "", 0, err
+	}
+	ok := false
+	defer func() {
+		_ = out.Close()
+		if !ok {
+			_ = os.Remove(dest)
+		}
+	}()
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(out, h), in)
+	if err != nil {
+		return "", n, err
+	}
+	if err := out.Sync(); err != nil {
+		return "", n, err
+	}
+	if err := out.Close(); err != nil {
+		return "", n, err
+	}
+	ok = true
+	return hex.EncodeToString(h.Sum(nil)), n, nil
+}
+
+type recoveryReport struct {
+	Started                   time.Time
+	Finished                  time.Time
+	Source                    string
+	SourceVersion             string
+	TargetVersion             string
+	WorkingCopy               string
+	Backup                    string
+	MetadataBackup            string
+	TestRestore               string
+	Destination               string
+	ReportPath                string
+	TechnicalLog              string
+	OriginalSHA256            string
+	OriginalSize              int64
+	Diagnostic                recoveryStats
+	PreMendDiagnostic         recoveryStats
+	PostMendDiagnostic        recoveryStats
+	PostMendChecked           bool
+	LimboCount                int
+	SkipData                  string
+	SuspectedRelation         string
+	IndexRescueAttempted      bool
+	IndexesDisabled           []string
+	RowRescueAttempted        bool
+	RowRescueRelation         string
+	RowRescueRecovered        int64
+	RowRescueLostKeys         []string
+	RowRescueComplete         bool
+	RowRescueStage            string
+	BasePartialBackup         string
+	DuplicateConflictDetected bool
+	DuplicateFailedRestore    string
+	DuplicateConflictSource   string
+	DuplicateConflictWork     string
+	DuplicateConflictReport   string
+	DuplicateRepairedBackup   string
+	DuplicateRepairApplied    bool
+	DuplicateRowsRemoved      int64
+	DuplicateConflicts        []restoreDuplicateConflict
+	BackupFailureDetails      string
+	FirebirdLogExcerpt        string
+	TestRestoreState          string
+	TestODS                   string
+	TestDialect               string
+	TestPageSize              string
+	FinalState                string
+	PartialRecovery           bool
+	Actions                   []string
+	Warnings                  []string
+	Errors                    []string
+}
+
+func (r *recoveryReport) action(text string) {
+	r.Actions = append(r.Actions, text)
+}
+
+func (r *recoveryReport) warning(text string) {
+	r.Warnings = append(r.Warnings, text)
+}
+
+func (r *recoveryReport) fail(text string) {
+	r.Errors = append(r.Errors, text)
+}
+
+func writeRecoveryReport(r recoveryReport) error {
+	if r.ReportPath == "" {
+		return errors.New("caminho do relatório não definido")
+	}
+	var b strings.Builder
+	b.WriteString("FIREBIRD TOOLBOX - RELATÓRIO DE RECUPERAÇÃO\r\n")
+	b.WriteString("Versão do utilitário: " + appVersion + "\r\n")
+	b.WriteString("Início: " + r.Started.Format("2006-01-02 15:04:05") + "\r\n")
+	if !r.Finished.IsZero() {
+		b.WriteString("Fim: " + r.Finished.Format("2006-01-02 15:04:05") + "\r\n")
+	}
+
+	b.WriteString("\r\nORIGEM\r\n")
+	b.WriteString("Arquivo: " + r.Source + "\r\n")
+	b.WriteString("Firebird: " + r.SourceVersion + "\r\n")
+	if r.OriginalSHA256 != "" {
+		b.WriteString("SHA-256: " + r.OriginalSHA256 + "\r\n")
+		b.WriteString(fmt.Sprintf("Tamanho: %d bytes\r\n", r.OriginalSize))
+	}
+
+	b.WriteString("\r\nDIAGNÓSTICO INICIAL\r\n")
+	b.WriteString("Classificação: " + r.Diagnostic.Summary() + "\r\n")
+	b.WriteString(fmt.Sprintf("Erros de registro: %d\r\n", r.Diagnostic.RecordErrors))
+	b.WriteString(fmt.Sprintf("Erros de índice: %d\r\n", r.Diagnostic.IndexErrors))
+	b.WriteString(fmt.Sprintf("Erros de transação: %d\r\n", r.Diagnostic.TransactionErrors))
+	b.WriteString(fmt.Sprintf("Erros de BLOB: %d\r\n", r.Diagnostic.BlobErrors))
+	b.WriteString(fmt.Sprintf("Erros de página: %d\r\n", r.Diagnostic.DatabaseErrors))
+	b.WriteString(fmt.Sprintf("Transações em limbo detectadas: %d\r\n", r.LimboCount))
+
+	if r.PostMendChecked {
+		b.WriteString("\r\nDIAGNÓSTICO PÓS-MEND\r\n")
+		b.WriteString("Classificação após mend: " + r.PostMendDiagnostic.Summary() + "\r\n")
+		comparison := recoveryStatsComparison(r.PreMendDiagnostic, r.PostMendDiagnostic)
+		b.WriteString(strings.ReplaceAll(comparison, "\n", "\r\n") + "\r\n")
+	}
+
+	if r.SkipData != "" {
+		b.WriteString("\r\nRECUPERAÇÃO PARCIAL / DADOS EXCLUÍDOS\r\n")
+		b.WriteString("Regex usada no -skip_data: " + r.SkipData + "\r\n")
+		if r.SuspectedRelation != "" {
+			b.WriteString("Relação suspeita: " + r.SuspectedRelation + "\r\n")
+		}
+		b.WriteString("ATENÇÃO: os dados das relações correspondentes não fazem parte do backup recuperado.\r\n")
+	}
+
+	if r.IndexRescueAttempted {
+		b.WriteString("\r\nRESGATE POR ÍNDICES\r\n")
+		if len(r.IndexesDisabled) > 0 {
+			b.WriteString("Índices desativados somente na cópia de trabalho: " + strings.Join(r.IndexesDisabled, ", ") + "\r\n")
+		} else {
+			b.WriteString("Nenhum índice pôde ser desativado com segurança na cópia de trabalho.\r\n")
+		}
+	}
+
+	if r.RowRescueAttempted {
+		b.WriteString("\r\nRESGATE DE REGISTROS DA RELAÇÃO\r\n")
+		b.WriteString("Relação: " + r.RowRescueRelation + "\r\n")
+		b.WriteString(fmt.Sprintf("Registros recuperados: %d\r\n", r.RowRescueRecovered))
+		if r.RowRescueComplete {
+			b.WriteString("Estado do resgate da relação: COMPLETO\r\n")
+		} else {
+			b.WriteString("Estado do resgate da relação: PARCIAL\r\n")
+		}
+		if len(r.RowRescueLostKeys) > 0 {
+			b.WriteString("Chaves primárias não recuperadas: " + strings.Join(r.RowRescueLostKeys, ", ") + "\r\n")
+		}
+		if r.RowRescueStage != "" {
+			b.WriteString("Banco temporário usado para o resgate: " + r.RowRescueStage + "\r\n")
+		}
+	}
+
+	if r.DuplicateConflictDetected {
+		b.WriteString("\r\nCONFLITOS DE CHAVE PRIMÁRIA / ÚNICA\r\n")
+		for _, conflict := range r.DuplicateConflicts {
+			b.WriteString("Tabela: " + conflict.Relation + "\r\n")
+			b.WriteString("Constraint: " + conflict.Constraint + "\r\n")
+			if conflict.IndexName != "" {
+				b.WriteString("Índice: " + conflict.IndexName + "\r\n")
+			}
+			b.WriteString("Chave problemática: " + duplicateConflictKeyLabel(conflict) + "\r\n")
+			b.WriteString(fmt.Sprintf("Ocorrências: %d | Extras removidas na cópia: %d\r\n", conflict.Occurrences, conflict.RowsRemoved))
+			if conflict.Identical {
+				b.WriteString("Comparação: duplicidade estrutural idêntica nas colunas comparáveis; uma ocorrência foi preservada.\r\n")
+			} else if len(conflict.DifferingColumns) > 0 {
+				b.WriteString("Campos diferentes: " + strings.Join(conflict.DifferingColumns, ", ") + "\r\n")
+			} else if conflict.ComparisonInconclusive {
+				b.WriteString("Comparação: inconclusiva; decisão explícita necessária antes de remover duplicidades.\r\n")
+			}
+			if conflict.UserAcceptedDataChoice {
+				b.WriteString("Decisão: usuário autorizou manter a primeira ocorrência física somente na cópia de trabalho.\r\n")
+			}
+			b.WriteString("\r\n")
+		}
+		if r.DuplicateRowsRemoved > 0 {
+			b.WriteString(fmt.Sprintf("Total de ocorrências extras removidas na cópia de trabalho: %d\r\n", r.DuplicateRowsRemoved))
+		}
+	}
+
+	if r.BackupFailureDetails != "" || r.SuspectedRelation != "" {
+		b.WriteString("\r\nFALHA DO BACKUP / DIAGNÓSTICO DO GBAK\r\n")
+		if r.SuspectedRelation != "" {
+			b.WriteString("Possível relação afetada: " + r.SuspectedRelation + "\r\n")
+		}
+		if r.BackupFailureDetails != "" {
+			b.WriteString(strings.ReplaceAll(r.BackupFailureDetails, "\n", "\r\n") + "\r\n")
+		}
+	}
+
+	b.WriteString("\r\nARQUIVOS DE RECUPERAÇÃO\r\n")
+	if r.WorkingCopy != "" {
+		b.WriteString("Cópia de trabalho: " + r.WorkingCopy + "\r\n")
+	}
+	if r.Backup != "" {
+		b.WriteString("Backup: " + r.Backup + "\r\n")
+	}
+	if r.MetadataBackup != "" {
+		b.WriteString("Backup somente de metadados: " + r.MetadataBackup + "\r\n")
+	}
+	if r.BasePartialBackup != "" {
+		b.WriteString("Backup-base sem a relação problemática: " + r.BasePartialBackup + "\r\n")
+	}
+	if r.TestRestore != "" {
+		b.WriteString("Restore de teste: " + r.TestRestore + "\r\n")
+	}
+	if r.Destination != "" {
+		b.WriteString("Destino final: " + r.Destination + "\r\n")
+	}
+	if r.TechnicalLog != "" {
+		b.WriteString("Log técnico completo: " + r.TechnicalLog + "\r\n")
+	}
+	if r.DuplicateFailedRestore != "" {
+		b.WriteString("Restore originalmente falho preservado: " + r.DuplicateFailedRestore + "\r\n")
+	}
+	if r.DuplicateConflictSource != "" {
+		b.WriteString("Banco de inspeção com índices inativos preservado: " + r.DuplicateConflictSource + "\r\n")
+	}
+	if r.DuplicateConflictWork != "" {
+		b.WriteString("Banco saneado de trabalho: " + r.DuplicateConflictWork + "\r\n")
+	}
+	if r.DuplicateConflictReport != "" {
+		b.WriteString("Relatório de conflitos de chave: " + r.DuplicateConflictReport + "\r\n")
+	}
+	if r.DuplicateRepairedBackup != "" {
+		b.WriteString("Backup após saneamento de duplicidades: " + r.DuplicateRepairedBackup + "\r\n")
+	}
+
+	b.WriteString("\r\nAÇÕES EXECUTADAS\r\n")
+	if len(r.Actions) == 0 {
+		b.WriteString("- Nenhuma ação registrada.\r\n")
+	}
+	for _, item := range r.Actions {
+		b.WriteString("- " + item + "\r\n")
+	}
+	if len(r.Warnings) > 0 {
+		b.WriteString("\r\nAVISOS\r\n")
+		for _, item := range r.Warnings {
+			b.WriteString("- " + item + "\r\n")
+		}
+	}
+	if len(r.Errors) > 0 {
+		b.WriteString("\r\nERROS\r\n")
+		for _, item := range r.Errors {
+			b.WriteString("- " + item + "\r\n")
+		}
+	}
+
+	if r.FirebirdLogExcerpt != "" {
+		b.WriteString("\r\nFIREBIRD.LOG - TRECHO GERADO DURANTE A RECUPERAÇÃO\r\n")
+		b.WriteString(strings.ReplaceAll(r.FirebirdLogExcerpt, "\n", "\r\n") + "\r\n")
+	}
+
+	b.WriteString("\r\nRESULTADO\r\n")
+	if r.TestRestoreState != "" {
+		b.WriteString("Restore de teste: " + r.TestRestoreState + "\r\n")
+	}
+	if r.TestODS != "" {
+		b.WriteString("ODS validado: " + r.TestODS + "\r\n")
+	}
+	if r.TestDialect != "" {
+		b.WriteString("Dialeto validado: " + r.TestDialect + "\r\n")
+	}
+	if r.TestPageSize != "" {
+		b.WriteString("Tamanho de página validado: " + r.TestPageSize + " bytes\r\n")
+	}
+	if r.FinalState != "" {
+		b.WriteString("Estado final: " + r.FinalState + "\r\n")
+	}
+	return os.WriteFile(r.ReportPath, []byte(b.String()), 0600)
+}
+
+func recoveryWorkspace(c workflowConfig) (dir, copyPath, backupPath, testPath, reportPath string, err error) {
+	base := strings.TrimSuffix(filepath.Base(c.Source), filepath.Ext(c.Source))
+	if base == "" {
+		base = "DBCOM"
+	}
+	stamp := time.Now().Format("20060102_150405_000")
+	dir = filepath.Join(c.BackupDir, "RECOVERY_"+base+"_"+stamp)
+	if err = os.MkdirAll(dir, 0700); err != nil {
+		return
+	}
+	ext := filepath.Ext(c.Source)
+	if ext == "" {
+		ext = ".FDB"
+	}
+	copyPath = filepath.Join(dir, base+"_WORK"+ext)
+	backupPath = filepath.Join(dir, base+"_RECOVERY.BAK")
+	testPath = filepath.Join(dir, base+"_RESTORE_TEST"+ext)
+	reportPath = filepath.Join(dir, "RELATORIO_RECUPERACAO.txt")
+	return
+}
+
+func countLimboTransactions(output string) int {
+	re := regexp.MustCompile(`(?im)^\s*Transaction\s+\d+\s+is in limbo\.`)
+	return len(re.FindAllString(output, -1))
+}
+
+func gfixMendArgs(user, password, dbConn string) []string {
+	// O nome completo -mend é aceito nas linhas atuais; nas antigas corresponde a -m[end].
+	return []string{"-user", user, "-pass", password, "-mend", "-ignore", dbConn}
+}
+
+func normalizeSkipData(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 {
+		if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
+			value = strings.TrimSpace(value[1 : len(value)-1])
+		}
+	}
+	return value
+}
+
+func advancedBackupArgs(c workflowConfig, dbConn, backup string, useIgnore, ignoreLimbo bool) []string {
+	args := []string{"-b", "-v"}
+	if useIgnore {
+		args = append(args, "-ignore")
+	}
+	if ignoreLimbo {
+		args = append(args, "-limbo")
+	}
+	if skip := normalizeSkipData(c.SkipData); skip != "" && versionNumber(c.SourceVersion) >= 3.0 {
+		args = append(args, "-skip_data", skip)
+	}
+	args = append(args, "-user", c.User, "-pass", c.Password, dbConn, backup)
+	return args
+}
+
+func testRestoreEngine(c workflowConfig) (version, root, port string) {
+	if c.TargetVersion != "" {
+		return c.TargetVersion, c.FbTarget, c.TargetPort
+	}
+	return c.SourceVersion, c.FbSource, c.SourcePort
+}
+
+func restoreTestArgs(version, port, user, password, backup, dest string, oneAtATime bool) []string {
+	flags := []string{"-c", "-v"}
+	if oneAtATime {
+		flags = append(flags, "-one_at_a_time")
+	}
+	if supportsServiceManagerRestore(version) {
+		return append(flags, "-se", serviceManager(port), "-user", user, "-password", password, backup, dest)
+	}
+	return append(flags, "-user", user, "-password", password, backup, dest)
+}
+
+func restoreInactiveArgs(version, port, user, password, backup, dest string) []string {
+	flags := []string{"-c", "-v", "-inactive"}
+	if supportsServiceManagerRestore(version) {
+		return append(flags, "-se", serviceManager(port), "-user", user, "-password", password, backup, dest)
+	}
+	return append(flags, "-user", user, "-password", password, backup, dest)
+}
+
+func restoreBackupWithInactiveIndexes(ctx context.Context, root, version, port, user, password, backup, dest string) error {
+	gbak := firebirdExe(root, version, "gbak.exe")
+	if !fileExists(gbak) {
+		return fmt.Errorf("não encontrei gbak.exe do Firebird %s", version)
+	}
+	_ = os.Remove(dest)
+	_, err := runRecoveryCapture(ctx, "Restaurando cópia de inspeção com todos os índices inativos...", gbak, restoreInactiveArgs(version, port, user, password, backup, dest)...)
+	if err != nil {
+		return err
+	}
+	if !fileExists(dest) {
+		return fmt.Errorf("o restore com índices inativos terminou sem criar %s", dest)
+	}
+	return nil
+}
+
+func inactiveUserIndexes(ctx context.Context, root, version, port, user, password, dbPath string) ([]string, error) {
+	script := "SET HEADING OFF;\nSET LIST OFF;\nSET COUNT OFF;\nSELECT 'FTB_INACTIVE|' || TRIM(RDB$INDEX_NAME) FROM RDB$INDICES WHERE COALESCE(RDB$SYSTEM_FLAG,0) = 0 AND COALESCE(RDB$INDEX_INACTIVE,0) <> 0 ORDER BY RDB$INDEX_NAME;\nQUIT;\n"
+	out, err := runISQLScript(ctx, root, version, port, user, password, dbPath, "Listando índices inativos no banco de saneamento...", script)
+	if err != nil {
+		return nil, err
+	}
+	return markerLines(out, "FTB_INACTIVE|"), nil
+}
+
+func activateAllInactiveUserIndexes(ctx context.Context, root, version, port, user, password, dbPath string) error {
+	remaining, err := inactiveUserIndexes(ctx, root, version, port, user, password, dbPath)
+	if err != nil {
+		return err
+	}
+	if len(remaining) == 0 {
+		return nil
+	}
+
+	// Constraints restored with -inactive can depend on other constraint indexes.
+	// Repeating activation passes avoids treating a temporary dependency ordering
+	// failure (for example, a foreign key attempted before its referenced unique
+	// index) as permanent corruption.
+	previousCount := len(remaining) + 1
+	for pass := 1; len(remaining) > 0 && pass <= 6; pass++ {
+		if len(remaining) >= previousCount {
+			break
+		}
+		previousCount = len(remaining)
+		_, _ = runISQLScript(ctx, root, version, port, user, password, dbPath,
+			fmt.Sprintf("Reconstruindo e reativando índices do banco saneado (passo %d)...", pass),
+			buildAlterIndexesScript(remaining, true))
+		remaining, err = inactiveUserIndexes(ctx, root, version, port, user, password, dbPath)
+		if err != nil {
+			return err
+		}
+	}
+	if len(remaining) > 0 {
+		shown := remaining
+		if len(shown) > 12 {
+			shown = shown[:12]
+		}
+		return fmt.Errorf("%d índice(s) continuaram inativos após o saneamento: %s", len(remaining), strings.Join(shown, ", "))
+	}
+	return nil
+}
+
+type duplicateKeyPart struct {
+	Column   string
+	RawValue string
+	IsNull   bool
+}
+
+type restoreDuplicateConflict struct {
+	Constraint             string
+	Relation               string
+	KeyParts               []duplicateKeyPart
+	IndexName              string
+	Occurrences            int64
+	DifferingColumns       []string
+	InconclusiveColumns    []string
+	ComparisonInconclusive bool
+	Identical              bool
+	UserAcceptedDataChoice bool
+	RowsRemoved            int64
+}
+
+func splitKeyAssignments(text string) []string {
+	text = strings.TrimSpace(text)
+	text = strings.TrimPrefix(text, "(")
+	text = strings.TrimSuffix(text, ")")
+	var result []string
+	start := 0
+	inSingle, inDouble := false, false
+	for i := 0; i < len(text); i++ {
+		switch text[i] {
+		case '\'':
+			if !inDouble {
+				if inSingle && i+1 < len(text) && text[i+1] == '\'' {
+					i++
+					continue
+				}
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+			}
+		case ',':
+			if !inSingle && !inDouble {
+				part := strings.TrimSpace(text[start:i])
+				if part != "" {
+					result = append(result, part)
+				}
+				start = i + 1
+			}
+		}
+	}
+	if tail := strings.TrimSpace(text[start:]); tail != "" {
+		result = append(result, tail)
+	}
+	return result
+}
+
+func parseProblematicKey(text string) []duplicateKeyPart {
+	var result []duplicateKeyPart
+	assignRe := regexp.MustCompile(`^\s*"([^"]+)"\s*=\s*(.+?)\s*$`)
+	for _, item := range splitKeyAssignments(text) {
+		m := assignRe.FindStringSubmatch(item)
+		if len(m) != 3 {
+			continue
+		}
+		raw := strings.TrimSpace(m[2])
+		result = append(result, duplicateKeyPart{
+			Column:   strings.TrimSpace(m[1]),
+			RawValue: raw,
+			IsNull:   strings.EqualFold(raw, "NULL") || strings.EqualFold(raw, "<NULL>"),
+		})
+	}
+	return result
+}
+
+func duplicateConflictKeyLabel(conflict restoreDuplicateConflict) string {
+	var parts []string
+	for _, key := range conflict.KeyParts {
+		parts = append(parts, key.Column+"="+key.RawValue)
+	}
+	return strings.Join(parts, " / ")
+}
+
+func parseRestoreDuplicateConflicts(output string) []restoreDuplicateConflict {
+	constraintRe := regexp.MustCompile(`(?i)violation of PRIMARY or UNIQUE KEY constraint\s+"([^"]+)"\s+on table\s+"([^"]+)"`)
+	keyRe := regexp.MustCompile(`(?i)Problematic key value is\s*(\(.+\))`)
+	var pending *restoreDuplicateConflict
+	var result []restoreDuplicateConflict
+	seen := map[string]bool{}
+	for _, raw := range strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(raw)
+		if m := constraintRe.FindStringSubmatch(line); len(m) == 3 {
+			pending = &restoreDuplicateConflict{Constraint: strings.TrimSpace(m[1]), Relation: strings.TrimSpace(m[2])}
+			continue
+		}
+		if pending == nil {
+			continue
+		}
+		if m := keyRe.FindStringSubmatch(line); len(m) == 2 {
+			pending.KeyParts = parseProblematicKey(m[1])
+			if len(pending.KeyParts) == 0 {
+				pending = nil
+				continue
+			}
+			key := strings.ToUpper(pending.Relation + "|" + pending.Constraint + "|" + duplicateConflictKeyLabel(*pending))
+			if !seen[key] {
+				seen[key] = true
+				result = append(result, *pending)
+			}
+			pending = nil
+		}
+	}
+	return result
+}
+
+func duplicateKeySQLValue(part duplicateKeyPart) (string, error) {
+	if part.IsNull {
+		return "NULL", nil
+	}
+	raw := strings.TrimSpace(part.RawValue)
+	if raw == "" || strings.ContainsAny(raw, "\r\n;") || strings.Contains(raw, "--") || strings.Contains(raw, "/*") {
+		return "", fmt.Errorf("valor de chave inseguro ou vazio para %s", part.Column)
+	}
+	if regexp.MustCompile(`^[+-]?(?:\d+\.?\d*|\d*\.\d+)(?:[eE][+-]?\d+)?$`).MatchString(raw) {
+		return raw, nil
+	}
+	if regexp.MustCompile(`(?i)^x'[0-9a-f]+'$`).MatchString(raw) {
+		return raw, nil
+	}
+	if len(raw) >= 2 && raw[0] == '\'' && raw[len(raw)-1] == '\'' {
+		return raw, nil
+	}
+	trimmed := strings.Trim(raw, `"`)
+	return sqlStringLiteral(trimmed), nil
+}
+
+func duplicateKeyPredicate(conflict restoreDuplicateConflict, alias string) (string, error) {
+	if len(conflict.KeyParts) == 0 {
+		return "", errors.New("conflito sem valores de chave")
+	}
+	prefix := ""
+	if strings.TrimSpace(alias) != "" {
+		prefix = alias + "."
+	}
+	var parts []string
+	for _, key := range conflict.KeyParts {
+		column := prefix + sqlIdentifier(key.Column)
+		if key.IsNull {
+			parts = append(parts, column+" IS NULL")
+			continue
+		}
+		value, err := duplicateKeySQLValue(key)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, column+" = "+value)
+	}
+	return strings.Join(parts, " AND "), nil
+}
+
+func parseMarkerInt64(output, marker string) int64 {
+	for _, line := range markerLines(output, marker) {
+		if n, err := strconv.ParseInt(strings.TrimSpace(line), 10, 64); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+func duplicateOccurrenceCount(ctx context.Context, root, version, port, user, password, dbPath string, conflict restoreDuplicateConflict) (int64, error) {
+	where, err := duplicateKeyPredicate(conflict, "T")
+	if err != nil {
+		return 0, err
+	}
+	script := "SET HEADING OFF;\nSET LIST OFF;\nSET COUNT OFF;\nSELECT 'FTB_DUPCOUNT=' || CAST(COUNT(*) AS VARCHAR(30)) FROM " + sqlIdentifier(conflict.Relation) + " T WHERE " + where + ";\nQUIT;\n"
+	out, err := runISQLScript(ctx, root, version, port, user, password, dbPath, "Contando ocorrências da chave duplicada em "+conflict.Relation+"...", script)
+	if err != nil {
+		return 0, err
+	}
+	return parseMarkerInt64(out, "FTB_DUPCOUNT="), nil
+}
+
+func columnIsConflictComparable(col relationColumn) bool {
+	return !col.HasArray && col.FieldType != 261
+}
+
+func duplicateDifferenceScript(meta relationMetadata, conflict restoreDuplicateConflict) (string, []string, error) {
+	whereA, err := duplicateKeyPredicate(conflict, "A")
+	if err != nil {
+		return "", nil, err
+	}
+	whereB, err := duplicateKeyPredicate(conflict, "B")
+	if err != nil {
+		return "", nil, err
+	}
+	var b strings.Builder
+	b.WriteString("SET HEADING OFF;\nSET LIST OFF;\nSET COUNT OFF;\n")
+	var inconclusive []string
+	for _, col := range meta.Columns {
+		if !columnIsConflictComparable(col) {
+			inconclusive = append(inconclusive, col.Name)
+			continue
+		}
+		qcol := sqlIdentifier(col.Name)
+		b.WriteString("SELECT 'FTB_DIFF|" + strings.ReplaceAll(col.Name, "'", "''") + "' FROM RDB$DATABASE WHERE EXISTS (SELECT FIRST 1 1 FROM " + sqlIdentifier(meta.Name) + " A, " + sqlIdentifier(meta.Name) + " B WHERE " + whereA + " AND " + whereB + " AND A.RDB$DB_KEY <> B.RDB$DB_KEY AND A." + qcol + " IS DISTINCT FROM B." + qcol + ");\n")
+	}
+	b.WriteString("QUIT;\n")
+	return b.String(), inconclusive, nil
+}
+
+func analyzeDuplicateConflict(ctx context.Context, root, version, port, user, password, dbPath string, conflict restoreDuplicateConflict) (restoreDuplicateConflict, string, error) {
+	meta, err := loadRelationMetadataAt(ctx, root, version, port, user, password, dbPath, conflict.Relation)
+	if err != nil {
+		return conflict, "", err
+	}
+	count, err := duplicateOccurrenceCount(ctx, root, version, port, user, password, dbPath, conflict)
+	if err != nil {
+		return conflict, "", err
+	}
+	conflict.Occurrences = count
+	script, inconclusive, err := duplicateDifferenceScript(meta, conflict)
+	if err != nil {
+		return conflict, "", err
+	}
+	out, diffErr := runISQLScript(ctx, root, version, port, user, password, dbPath, "Comparando ocorrências da chave duplicada em "+conflict.Relation+"...", script)
+	if diffErr != nil {
+		conflict.ComparisonInconclusive = true
+		conflict.InconclusiveColumns = append(conflict.InconclusiveColumns, "comparação SQL falhou: "+diffErr.Error())
+	} else {
+		conflict.DifferingColumns = markerLines(out, "FTB_DIFF|")
+		conflict.InconclusiveColumns = inconclusive
+		conflict.ComparisonInconclusive = len(inconclusive) > 0 && len(conflict.DifferingColumns) == 0
+		conflict.Identical = len(conflict.DifferingColumns) == 0 && len(inconclusive) == 0
+	}
+	where, predErr := duplicateKeyPredicate(conflict, "T")
+	if predErr != nil {
+		return conflict, "", predErr
+	}
+	exportScript := "SET LIST ON;\nSET HEADING OFF;\nSET COUNT ON;\nSELECT * FROM " + sqlIdentifier(conflict.Relation) + " T WHERE " + where + ";\nQUIT;\n"
+	export, exportErr := runISQLScript(ctx, root, version, port, user, password, dbPath, "Exportando ocorrências conflitantes de "+conflict.Relation+"...", exportScript)
+	if exportErr != nil {
+		export += "\n[Não foi possível exportar todas as colunas: " + exportErr.Error() + "]"
+	}
+	return conflict, export, nil
+}
+
+func duplicateCleanupScript(conflict restoreDuplicateConflict) (string, error) {
+	where, err := duplicateKeyPredicate(conflict, "T")
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	b.WriteString("SET BAIL ON;\nSET TERM ^;\nEXECUTE BLOCK AS\n")
+	b.WriteString("DECLARE VARIABLE K CHAR(8) CHARACTER SET OCTETS;\nDECLARE VARIABLE N INTEGER;\nBEGIN\n  N = 0;\n")
+	b.WriteString("  FOR SELECT T.RDB$DB_KEY FROM " + sqlIdentifier(conflict.Relation) + " T WHERE " + where + " PLAN (T NATURAL) INTO :K DO\n  BEGIN\n")
+	b.WriteString("    N = N + 1;\n    IF (N > 1) THEN DELETE FROM " + sqlIdentifier(conflict.Relation) + " WHERE RDB$DB_KEY = :K;\n  END\nEND^\nSET TERM ;^\nCOMMIT;\nQUIT;\n")
+	return b.String(), nil
+}
+
+func constraintIndexName(ctx context.Context, root, version, port, user, password, dbPath string, conflict restoreDuplicateConflict) (string, error) {
+	script := "SET HEADING OFF;\nSET LIST OFF;\nSET COUNT OFF;\nSELECT 'FTB_CINDEX|' || TRIM(RDB$INDEX_NAME) FROM RDB$RELATION_CONSTRAINTS WHERE RDB$CONSTRAINT_NAME = " + sqlStringLiteral(conflict.Constraint) + " AND RDB$RELATION_NAME = " + sqlStringLiteral(conflict.Relation) + ";\nQUIT;\n"
+	out, err := runISQLScript(ctx, root, version, port, user, password, dbPath, "Localizando índice da constraint "+conflict.Constraint+"...", script)
+	if err != nil {
+		return "", err
+	}
+	lines := markerLines(out, "FTB_CINDEX|")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) == "" {
+		return "", fmt.Errorf("não foi possível localizar o índice da constraint %s", conflict.Constraint)
+	}
+	return strings.TrimSpace(lines[0]), nil
+}
+
+func bringDatabaseOnline(ctx context.Context, root, version, port, user, password, dbPath string) error {
+	gfix := firebirdExe(root, version, "gfix.exe")
+	if !fileExists(gfix) {
+		return fmt.Errorf("não encontrei gfix.exe do Firebird %s", version)
+	}
+	_, err := runRecoveryCapture(ctx, "Colocando banco parcial online somente para inspeção e saneamento...", gfix, "-user", user, "-pass", password, "-online", databaseConnection(port, dbPath))
+	return err
+}
+
+func backupDatabaseWithEngine(ctx context.Context, root, version, port, user, password, dbPath, backup, label string) error {
+	gbak := firebirdExe(root, version, "gbak.exe")
+	if !fileExists(gbak) {
+		return fmt.Errorf("não encontrei gbak.exe do Firebird %s", version)
+	}
+	_ = os.Remove(backup)
+	_, err := runRecoveryCapture(ctx, label, gbak, "-b", "-v", "-user", user, "-pass", password, databaseConnection(port, dbPath), backup)
+	if err != nil {
+		return err
+	}
+	if !fileExists(backup) {
+		return fmt.Errorf("o backup saneado não foi criado: %s", backup)
+	}
+	return nil
+}
+
+func failedRestoreSnapshotPath(testPath string, round int) string {
+	ext := filepath.Ext(testPath)
+	base := strings.TrimSuffix(testPath, ext)
+	if ext == "" {
+		ext = ".RED"
+	}
+	return fmt.Sprintf("%s_RESTORE_FALHO_%02d%s", base, round, ext)
+}
+
+func conflictSnapshotPath(testPath string, round int) string {
+	ext := filepath.Ext(testPath)
+	base := strings.TrimSuffix(testPath, ext)
+	if ext == "" {
+		ext = ".RED"
+	}
+	return fmt.Sprintf("%s_CONFLITO_ORIGINAL_%02d%s", base, round, ext)
+}
+
+func conflictRepairedPath(testPath string, round int) string {
+	ext := filepath.Ext(testPath)
+	base := strings.TrimSuffix(testPath, ext)
+	if ext == "" {
+		ext = ".RED"
+	}
+	return fmt.Sprintf("%s_CONFLITO_SANEADO_%02d%s", base, round, ext)
+}
+
+func deduplicatedBackupPath(backup string, round int) string {
+	ext := filepath.Ext(backup)
+	base := strings.TrimSuffix(backup, ext)
+	if ext == "" {
+		ext = ".BAK"
+	}
+	return fmt.Sprintf("%s_SEM_DUPLICIDADES_%02d%s", base, round, ext)
+}
+
+func writeDuplicateConflictReport(path, snapshot string, conflicts []restoreDuplicateConflict, exports []string) error {
+	var b strings.Builder
+	b.WriteString("FIREBIRD TOOLBOX - CONFLITOS DE CHAVE ÚNICA / PRIMÁRIA\r\n")
+	b.WriteString("Versão: " + appVersion + "\r\n")
+	b.WriteString("Banco de inspeção preservado: " + snapshot + "\r\n")
+	for i, conflict := range conflicts {
+		b.WriteString(fmt.Sprintf("\r\nCONFLITO %d\r\n", i+1))
+		b.WriteString("Tabela: " + conflict.Relation + "\r\n")
+		b.WriteString("Constraint: " + conflict.Constraint + "\r\n")
+		if conflict.IndexName != "" {
+			b.WriteString("Índice: " + conflict.IndexName + "\r\n")
+		}
+		b.WriteString("Chave: " + duplicateConflictKeyLabel(conflict) + "\r\n")
+		b.WriteString(fmt.Sprintf("Ocorrências encontradas: %d\r\n", conflict.Occurrences))
+		if conflict.Identical {
+			b.WriteString("Comparação: ocorrências logicamente idênticas nas colunas comparáveis.\r\n")
+		} else if len(conflict.DifferingColumns) > 0 {
+			b.WriteString("Campos diferentes: " + strings.Join(conflict.DifferingColumns, ", ") + "\r\n")
+		} else if conflict.ComparisonInconclusive {
+			b.WriteString("Comparação: inconclusiva.\r\n")
+		}
+		if len(conflict.InconclusiveColumns) > 0 {
+			b.WriteString("Colunas não comparadas automaticamente: " + strings.Join(conflict.InconclusiveColumns, ", ") + "\r\n")
+		}
+		if conflict.RowsRemoved > 0 {
+			b.WriteString(fmt.Sprintf("Ocorrências extras removidas na CÓPIA DE TRABALHO: %d\r\n", conflict.RowsRemoved))
+		}
+		if i < len(exports) && strings.TrimSpace(exports[i]) != "" {
+			b.WriteString("\r\nDADOS EXPORTADOS PARA INSPEÇÃO\r\n")
+			b.WriteString(strings.ReplaceAll(exports[i], "\n", "\r\n"))
+			b.WriteString("\r\n")
+		}
+	}
+	return os.WriteFile(path, []byte(b.String()), 0600)
+}
+
+func repairRestoreDuplicateConflicts(ctx context.Context, c workflowConfig, backup, testPath string, report *recoveryReport, conflicts []restoreDuplicateConflict, version, root, port string, round int) (string, error) {
+	if len(conflicts) == 0 {
+		return "", errors.New("nenhum conflito de chave foi informado")
+	}
+	if versionNumber(version) < 2.0 {
+		return "", fmt.Errorf("a recuperação automática de duplicidades exige Firebird 2.0 ou superior; conflito detectado em %s", conflicts[0].Relation)
+	}
+	failedRestore := ""
+	if fileExists(testPath) {
+		failedRestore = failedRestoreSnapshotPath(testPath, round)
+		_ = os.Remove(failedRestore)
+		if err := os.Rename(testPath, failedRestore); err != nil {
+			if _, _, copyErr := fileCopyWithSHA256(testPath, failedRestore); copyErr != nil {
+				return "", fmt.Errorf("não foi possível preservar o restore originalmente falho: %w", err)
+			}
+			_ = os.Remove(testPath)
+		}
+	}
+	report.DuplicateConflictDetected = true
+	if failedRestore != "" {
+		report.DuplicateFailedRestore = failedRestore
+		report.action("Restore que falhou na ativação dos índices preservado para auditoria")
+	}
+
+	if err := restoreBackupWithInactiveIndexes(ctx, root, version, port, c.User, c.Password, backup, testPath); err != nil {
+		report.DuplicateConflictSource = failedRestore
+		return "", fmt.Errorf("o restore normal identificou duplicidade, mas a nova restauração com -inactive também falhou: %w", err)
+	}
+	report.action("Backup restaurado novamente com -inactive para preservar todos os registros e permitir saneamento controlado")
+
+	snapshot := conflictSnapshotPath(testPath, round)
+	_ = os.Remove(snapshot)
+	if _, _, err := fileCopyWithSHA256(testPath, snapshot); err != nil {
+		return "", fmt.Errorf("não foi possível preservar o banco de inspeção antes do saneamento: %w", err)
+	}
+	report.DuplicateConflictSource = snapshot
+	report.action("Banco completo com todos os índices inativos e todas as ocorrências conflitantes preservado antes de qualquer remoção")
+
+	conflictReport := filepath.Join(filepath.Dir(report.ReportPath), "CONFLITOS_DUPLICIDADE.txt")
+	report.DuplicateConflictReport = conflictReport
+	exports := make([]string, 0, len(conflicts))
+	analyzed := make([]restoreDuplicateConflict, 0, len(conflicts))
+	for _, conflict := range conflicts {
+		indexName, idxErr := constraintIndexName(ctx, root, version, port, c.User, c.Password, testPath, conflict)
+		if idxErr == nil {
+			conflict.IndexName = indexName
+		}
+		checked, export, err := analyzeDuplicateConflict(ctx, root, version, port, c.User, c.Password, testPath, conflict)
+		if err != nil {
+			return "", fmt.Errorf("falha ao analisar chave duplicada %s em %s: %w", duplicateConflictKeyLabel(conflict), conflict.Relation, err)
+		}
+		if checked.Occurrences < 2 {
+			return "", fmt.Errorf("o restore reportou duplicidade em %s, mas a cópia parcial contém apenas %d ocorrência(s) da chave %s", checked.Relation, checked.Occurrences, duplicateConflictKeyLabel(checked))
+		}
+		if checked.IndexName == "" {
+			checked.IndexName = conflict.IndexName
+		}
+		analyzed = append(analyzed, checked)
+		exports = append(exports, export)
+	}
+	_ = writeDuplicateConflictReport(conflictReport, snapshot, analyzed, exports)
+
+	for i := range analyzed {
+		conflict := &analyzed[i]
+		needsDecision := !conflict.Identical
+		if needsDecision {
+			comparison := "A comparação automática ficou inconclusiva."
+			if len(conflict.DifferingColumns) > 0 {
+				comparison = "Os registros possuem conteúdo diferente.\nCampos diferentes: " + strings.Join(conflict.DifferingColumns, ", ")
+			} else if len(conflict.InconclusiveColumns) > 0 {
+				comparison = "Há colunas que não podem ser comparadas automaticamente com segurança: " + strings.Join(conflict.InconclusiveColumns, ", ")
+			}
+			msg := "Foi encontrada uma chave duplicada durante o restore.\n\nTabela: " + conflict.Relation + "\nChave: " + duplicateConflictKeyLabel(*conflict) + fmt.Sprintf("\nOcorrências: %d\n\n", conflict.Occurrences) + comparison + "\n\nAs ocorrências originais foram preservadas em:\n" + snapshot + "\n\nDetalhes completos:\n" + conflictReport + "\n\nDeseja continuar mantendo a PRIMEIRA ocorrência física e removendo somente as ocorrências extras NA CÓPIA DE TRABALHO?\n\nEscolha NÃO se precisar decidir manualmente qual registro deve permanecer."
+			if messageBox("Conflito de dados na chave primária", msg, MB_YESNO|MB_ICONWARNING) != IDYES {
+				report.DuplicateConflicts = append(report.DuplicateConflicts, analyzed...)
+				report.warning("Conflito de chave preservado sem escolha automática: " + conflict.Relation + " | " + duplicateConflictKeyLabel(*conflict))
+				report.FinalState = "CONFLITO DE DADOS AGUARDANDO DECISÃO; BANCO PARCIAL PRESERVADO"
+				return "", fmt.Errorf("conflito de dados requer decisão manual em %s (%s); nenhuma ocorrência foi removida", conflict.Relation, duplicateConflictKeyLabel(*conflict))
+			}
+			conflict.UserAcceptedDataChoice = true
+			report.PartialRecovery = true
+			report.warning("Usuário autorizou manter a primeira ocorrência física de uma chave com conteúdo diferente/inconclusivo em " + conflict.Relation + ": " + duplicateConflictKeyLabel(*conflict))
+		} else {
+			report.action("Duplicidade estrutural idêntica detectada em " + conflict.Relation + "; uma ocorrência será preservada")
+		}
+
+		cleanup, err := duplicateCleanupScript(*conflict)
+		if err != nil {
+			return "", err
+		}
+		if _, err := runISQLScript(ctx, root, version, port, c.User, c.Password, testPath, "Removendo apenas ocorrências extras da chave duplicada em "+conflict.Relation+"...", cleanup); err != nil {
+			return "", fmt.Errorf("não foi possível remover a duplicidade de %s: %w", conflict.Relation, err)
+		}
+		remaining, err := duplicateOccurrenceCount(ctx, root, version, port, c.User, c.Password, testPath, *conflict)
+		if err != nil {
+			return "", err
+		}
+		if remaining != 1 {
+			return "", fmt.Errorf("saneamento da chave %s em %s terminou com %d ocorrências; esperado: 1", duplicateConflictKeyLabel(*conflict), conflict.Relation, remaining)
+		}
+		conflict.RowsRemoved = conflict.Occurrences - 1
+		report.DuplicateRowsRemoved += conflict.RowsRemoved
+		report.action(fmt.Sprintf("Conflito %s / %s saneado na cópia de trabalho; %d ocorrência(s) extra(s) removida(s)", conflict.Relation, duplicateConflictKeyLabel(*conflict), conflict.RowsRemoved))
+	}
+	report.DuplicateConflicts = append(report.DuplicateConflicts, analyzed...)
+	_ = writeDuplicateConflictReport(conflictReport, snapshot, analyzed, exports)
+
+	if err := activateAllInactiveUserIndexes(ctx, root, version, port, c.User, c.Password, testPath); err != nil {
+		return "", fmt.Errorf("as duplicidades foram tratadas, mas nem todos os índices puderam ser reconstruídos: %w", err)
+	}
+	report.action("Todos os índices de usuário do restore com -inactive foram reconstruídos e reativados após o saneamento")
+
+	gfix := firebirdExe(root, version, "gfix.exe")
+	if fileExists(gfix) {
+		args := []string{"-user", c.User, "-pass", c.Password, "-v", "-full"}
+		if versionNumber(version) >= 2.1 {
+			args = append(args, "-no_update")
+		}
+		args = append(args, databaseConnection(port, testPath))
+		validationOutput, validationErr := runRecoveryCapture(ctx, "Validando banco saneado após resolver duplicidades...", gfix, args...)
+		if validationErr != nil || toolOutputHasOperationalFailure(validationOutput) {
+			return "", fmt.Errorf("o banco saneado não passou na validação após resolver as duplicidades")
+		}
+	}
+
+	repairedBackup := deduplicatedBackupPath(backup, round)
+	if err := backupDatabaseWithEngine(ctx, root, version, port, c.User, c.Password, testPath, repairedBackup, "Gerando backup após saneamento das chaves duplicadas..."); err != nil {
+		return "", fmt.Errorf("falha ao gerar backup após saneamento das duplicidades: %w", err)
+	}
+	repairedDB := conflictRepairedPath(testPath, round)
+	_ = os.Remove(repairedDB)
+	if err := os.Rename(testPath, repairedDB); err == nil {
+		report.DuplicateConflictWork = repairedDB
+	} else {
+		report.warning("O banco saneado permaneceu no caminho temporário porque não foi possível renomeá-lo: " + err.Error())
+		report.DuplicateConflictWork = testPath
+	}
+	report.DuplicateRepairApplied = true
+	report.DuplicateRepairedBackup = repairedBackup
+	report.action("Novo backup gerado após resolver conflitos de chave; será submetido a um novo restore de teste completo")
+	return repairedBackup, nil
+}
+
+type restoreTestResult struct {
+	Verified bool
+	Partial  bool
+	Path     string
+	Backup   string
+	Header   databaseHeader
+}
+
+func verifyBackupByRestore(ctx context.Context, c workflowConfig, backup, testPath string, report *recoveryReport) (restoreTestResult, error) {
+	return verifyBackupByRestoreDepth(ctx, c, backup, testPath, report, 1)
+}
+
+func verifyBackupByRestoreDepth(ctx context.Context, c workflowConfig, backup, testPath string, report *recoveryReport, round int) (restoreTestResult, error) {
+	version, root, port := testRestoreEngine(c)
+	gbak := firebirdExe(root, version, "gbak.exe")
+	if !fileExists(gbak) {
+		return restoreTestResult{}, fmt.Errorf("não encontrei gbak.exe do Firebird %s para o restore de teste", version)
+	}
+	resolvedPort := port
+	if supportsServiceManagerRestore(version) {
+		p, err := verifyFirebirdEndpoint(ctx, "do restore de teste", version, root, "", port)
+		if err != nil {
+			return restoreTestResult{}, err
+		}
+		resolvedPort = p
+	}
+	_ = os.Remove(testPath)
+	setProgress(76, "Testando o backup...")
+	output, err := runRecoveryCapture(ctx, "Testando backup com uma restauração temporária...", gbak, restoreTestArgs(version, resolvedPort, c.User, c.Password, backup, testPath, false)...)
+	if err == nil && fileExists(testPath) {
+		if report != nil && len(report.IndexesDisabled) > 0 && !report.DuplicateRepairApplied {
+			if _, activeErr := runISQLScript(ctx, root, version, resolvedPort, c.User, c.Password, testPath, "Reativando índices no restore de teste...", buildAlterIndexesScript(report.IndexesDisabled, true)); activeErr != nil {
+				report.warning("O restore de teste foi criado, mas a reativação dos índices falhou")
+				report.TestRestore = testPath
+				return restoreTestResult{Partial: true, Path: testPath}, fmt.Errorf("não foi possível reconstruir/reativar os índices após o restore de teste: %w", activeErr)
+			}
+			report.action("Índices temporariamente inativos na cópia foram reconstruídos/reativados no restore de teste")
+		}
+		report.action("Restore de teste completo concluído com sucesso no Firebird " + version)
+		result := restoreTestResult{Verified: true, Path: testPath, Backup: backup}
+		gstat := firebirdExe(root, version, "gstat.exe")
+		if fileExists(gstat) {
+			headerOutput, headerErr := runCommandCapture(ctx, gstat, "-h", testPath)
+			if headerErr == nil {
+				result.Header = parseDatabaseHeader(headerOutput)
+			}
+		}
+		if removeErr := os.Remove(testPath); removeErr != nil {
+			report.warning("Não foi possível excluir o banco temporário após o teste: " + removeErr.Error())
+			report.TestRestore = testPath
+		} else {
+			report.TestRestore = "temporário removido após validação"
+		}
+		return result, nil
+	}
+
+	if output != "" && !detailedLog {
+		appendLog("O restore de teste normal falhou. Últimas mensagens:")
+		appendLog(tailText(output, 12))
+	}
+
+	duplicateConflicts := parseRestoreDuplicateConflicts(output)
+	if len(duplicateConflicts) > 0 {
+		first := duplicateConflicts[0]
+		appendLog("Conflito de chave detectado no restore: " + first.Relation + " | " + duplicateConflictKeyLabel(first))
+		report.warning(fmt.Sprintf("Restore detectou %d conflito(s) de chave primária/única; -one_at_a_time não será usado porque não resolve duplicidades", len(duplicateConflicts)))
+		if round > 3 {
+			report.FinalState = "CONFLITOS DE CHAVE PERSISTEM APÓS TENTATIVAS DE SANEAMENTO"
+			return restoreTestResult{Partial: fileExists(testPath), Path: testPath, Backup: backup}, fmt.Errorf("conflitos de chave persistem após %d rodadas de saneamento", round-1)
+		}
+		repairedBackup, repairErr := repairRestoreDuplicateConflicts(ctx, c, backup, testPath, report, duplicateConflicts, version, root, resolvedPort, round)
+		if repairErr != nil {
+			path := report.DuplicateConflictSource
+			if path == "" {
+				path = testPath
+			}
+			return restoreTestResult{Partial: true, Path: path, Backup: backup}, repairErr
+		}
+		appendLog("✓ Conflitos de chave tratados na cópia. Repetindo restore de teste completo...")
+		return verifyBackupByRestoreDepth(ctx, c, repairedBackup, testPath, report, round+1)
+	}
+
+	_ = os.Remove(testPath)
+	if messageBox("Restore de teste falhou", "O backup foi criado, mas a restauração de teste falhou.\n\nDeseja tentar o modo de recuperação parcial (-one_at_a_time)?\n\nEsse modo restaura cada tabela separadamente e pode deixar um banco incompleto para resgate manual.", MB_YESNO|MB_ICONWARNING) != IDYES {
+		return restoreTestResult{}, fmt.Errorf("backup criado, mas não passou no restore de teste")
+	}
+
+	appendLog("Tentando restore parcial, uma tabela por vez...")
+	partialOutput, partialErr := runRecoveryCapture(ctx, "Restore parcial (-one_at_a_time)...", gbak, restoreTestArgs(version, resolvedPort, c.User, c.Password, backup, testPath, true)...)
+	if partialErr == nil && fileExists(testPath) {
+		report.action("Restore de teste com -one_at_a_time concluiu sem erro")
+		result := restoreTestResult{Verified: true, Path: testPath, Backup: backup}
+		gstat := firebirdExe(root, version, "gstat.exe")
+		if fileExists(gstat) {
+			headerOutput, headerErr := runCommandCapture(ctx, gstat, "-h", testPath)
+			if headerErr == nil {
+				result.Header = parseDatabaseHeader(headerOutput)
+			}
+		}
+		if removeErr := os.Remove(testPath); removeErr != nil {
+			report.warning("Não foi possível excluir o banco temporário após o teste com -one_at_a_time: " + removeErr.Error())
+			report.TestRestore = testPath
+		} else {
+			report.TestRestore = "temporário removido após validação com -one_at_a_time"
+		}
+		return result, nil
+	}
+	if fileExists(testPath) {
+		report.warning("Restore parcial gerou um banco incompleto para inspeção manual: " + testPath)
+		report.TestRestore = testPath
+		if partialOutput != "" && !detailedLog {
+			appendLog(tailText(partialOutput, 12))
+		}
+		return restoreTestResult{Partial: true, Path: testPath, Backup: backup}, fmt.Errorf("o backup só pôde ser restaurado parcialmente; banco parcial preservado em %s", testPath)
+	}
+	if partialErr != nil {
+		return restoreTestResult{}, fmt.Errorf("o backup não pôde ser restaurado nem em modo parcial: %w", partialErr)
+	}
+	return restoreTestResult{}, errors.New("o backup não pôde ser restaurado nem em modo parcial")
+}
+
+func runAdvancedRecovery(ctx context.Context, c workflowConfig) (retErr error) {
+	dir, workingCopy, backup, testPath, reportPath, err := recoveryWorkspace(c)
+	if err != nil {
+		return fmt.Errorf("não foi possível criar a pasta de recuperação: %w", err)
+	}
+	technicalLogPath := filepath.Join(dir, "LOG_TECNICO_RECUPERACAO.txt")
+	setRecoveryTechnicalLog(technicalLogPath)
+	logSnapshot := snapshotFirebirdLog(c.FbSource)
+	report := recoveryReport{
+		Started:       time.Now(),
+		Source:        c.Source,
+		SourceVersion: c.SourceVersion,
+		TargetVersion: c.TargetVersion,
+		Destination:   c.Dest,
+		ReportPath:    reportPath,
+		TechnicalLog:  technicalLogPath,
+		SkipData: func() string {
+			if versionNumber(c.SourceVersion) >= 3.0 {
+				return normalizeSkipData(c.SkipData)
+			}
+			return ""
+		}(),
+	}
+	report.PartialRecovery = report.SkipData != ""
+	setLastReport(reportPath)
+	if report.SkipData != "" {
+		report.warning("O backup de recuperação excluirá dados das tabelas que corresponderem à regex -skip_data: " + report.SkipData)
+	}
+	defer func() {
+		report.Finished = time.Now()
+		if delta := collectFirebirdLogDelta(logSnapshot); delta != "" {
+			report.FirebirdLogExcerpt = delta
+			report.action("Trecho do firebird.log gerado durante a recuperação foi incorporado ao relatório")
+		}
+		if retErr != nil {
+			report.fail(retErr.Error())
+			if report.FinalState == "" {
+				report.FinalState = "FALHA / RECUPERAÇÃO NÃO CONCLUÍDA"
+			}
+		}
+		setLastRecoveryState(report.FinalState)
+		if writeErr := writeRecoveryReport(report); writeErr != nil {
+			appendLog("ATENÇÃO: não foi possível gravar o relatório de recuperação: " + writeErr.Error())
+		} else {
+			appendLog("Relatório de recuperação: " + reportPath)
+		}
+		setRecoveryTechnicalLog("")
+	}()
+
+	appendLog("Modo avançado: o banco original não será alterado por mend/reparo pesado.")
+	appendLog("Pasta de recuperação: " + dir)
+	appendLog("Log técnico completo: " + technicalLogPath)
+	setProgress(8, "Preparando recuperação...")
+	resolvedPort, endpointErr := verifyFirebirdEndpoint(ctx, "da rotina", c.SourceVersion, c.FbSource, c.Service, c.SourcePort)
+	if endpointErr != nil {
+		return endpointErr
+	}
+	originalConn := databaseConnection(resolvedPort, c.Source)
+	gfix := firebirdExe(c.FbSource, c.SourceVersion, "gfix.exe")
+	gbak := firebirdExe(c.FbSource, c.SourceVersion, "gbak.exe")
+
+	setStatus("Executando diagnóstico profundo sem alterar o banco...")
+	setProgress(15, "Diagnóstico somente leitura...")
+	diagnosticOutput, diagnosticErr := runRecoveryCapture(ctx, "Etapa 1: Diagnóstico profundo (somente leitura)...", gfix, "-user", c.User, "-pass", c.Password, "-v", "-full", "-no_update", originalConn)
+	stats := parseRecoveryStats(diagnosticOutput)
+	readOnlyOnOriginal := !outputReportsUnknownSwitch(diagnosticOutput)
+	if !readOnlyOnOriginal {
+		report.warning("A versão do gfix não reconheceu -no_update; o Toolbox não executou validação potencialmente modificadora no original e fará o diagnóstico completo somente na cópia de trabalho")
+		appendLog("ATENÇÃO: este gfix não reconhece -no_update. O diagnóstico completo será feito somente na cópia de trabalho.")
+		stats = recoveryStats{}
+	} else {
+		if diagnosticErr != nil && !stats.HasCorruption() {
+			return fmt.Errorf("o diagnóstico somente leitura não pôde ser concluído: %w", diagnosticErr)
+		}
+		if toolOutputHasOperationalFailure(diagnosticOutput) && !stats.HasCorruption() {
+			return errors.New("o gfix não conseguiu concluir o diagnóstico; consulte o log técnico")
+		}
+		appendLog("Diagnóstico: " + stats.Summary() + ".")
+		report.action("Diagnóstico gfix -validate -full -no_update executado no banco original")
+	}
+	report.Diagnostic = stats
+
+	setProgress(22, "Verificando transações em limbo...")
+	limboOutput, limboErr := runRecoveryCapture(ctx, "Etapa 2: Verificando transações em limbo...", gfix, "-user", c.User, "-pass", c.Password, "-list", originalConn)
+	if limboErr != nil && toolOutputHasOperationalFailure(limboOutput) {
+		report.warning("Não foi possível concluir a verificação de transações em limbo")
+	} else {
+		report.LimboCount = countLimboTransactions(limboOutput)
+		if report.LimboCount > 0 {
+			appendLog(fmt.Sprintf("ATENÇÃO: %d transação(ões) em limbo detectada(s). Nenhuma foi resolvida automaticamente.", report.LimboCount))
+			report.warning(fmt.Sprintf("%d transação(ões) em limbo detectada(s); decisão de commit/rollback deve ser manual", report.LimboCount))
+		} else {
+			appendLog("✓ Nenhuma transação em limbo detectada.")
+		}
+	}
+
+	setStatus("Criando cópia de trabalho protegida...")
+	setProgress(30, "Criando cópia de trabalho...")
+	beforeCopy, statErr := os.Stat(c.Source)
+	if statErr != nil {
+		return fmt.Errorf("não foi possível conferir o arquivo original antes da cópia: %w", statErr)
+	}
+	hash, size, copyErr := fileCopyWithSHA256(c.Source, workingCopy)
+	if copyErr != nil {
+		return fmt.Errorf("não foi possível criar a cópia de trabalho: %w", copyErr)
+	}
+	afterCopy, statErr := os.Stat(c.Source)
+	if statErr != nil {
+		return fmt.Errorf("a cópia foi criada, mas não foi possível reconferir o arquivo original: %w", statErr)
+	}
+	if beforeCopy.Size() != afterCopy.Size() || !beforeCopy.ModTime().Equal(afterCopy.ModTime()) || size != beforeCopy.Size() {
+		report.warning("O arquivo original mudou enquanto a cópia de trabalho era criada")
+		return errors.New("o banco original mudou durante a cópia; feche todas as aplicações e repita para evitar uma cópia inconsistente")
+	}
+	stableHash, stableSize, hashErr := fileSHA256(c.Source)
+	if hashErr != nil {
+		return fmt.Errorf("a cópia foi criada, mas não foi possível reconferir o SHA-256 do original: %w", hashErr)
+	}
+	if stableSize != size || !strings.EqualFold(stableHash, hash) {
+		report.warning("O conteúdo do arquivo original mudou durante a cópia, embora tamanho/data possam não ter denunciado a alteração")
+		return errors.New("o conteúdo do banco original mudou durante a cópia; feche todas as aplicações e repita antes de qualquer recuperação")
+	}
+	report.WorkingCopy = workingCopy
+	report.OriginalSHA256 = stableHash
+	report.OriginalSize = size
+	report.action("Cópia de trabalho criada antes de qualquer reparo destrutivo")
+	appendLog("✓ Cópia de trabalho criada: " + workingCopy)
+	appendLog("SHA-256 estável do original: " + stableHash)
+	workingConn := databaseConnection(resolvedPort, workingCopy)
+	copyCheckArgs := []string{"-user", c.User, "-pass", c.Password, "-v", "-full"}
+	copyCheckLabel := "Conferindo integridade e acesso à cópia de trabalho..."
+	if readOnlyOnOriginal {
+		copyCheckArgs = append(copyCheckArgs, "-no_update")
+	} else {
+		copyCheckLabel = "Executando diagnóstico de compatibilidade SOMENTE na cópia de trabalho..."
+	}
+	copyCheckArgs = append(copyCheckArgs, workingConn)
+	copyCheckOutput, copyCheckErr := runRecoveryCapture(ctx, copyCheckLabel, gfix, copyCheckArgs...)
+	copyStats := parseRecoveryStats(copyCheckOutput)
+	if copyCheckErr != nil && !copyStats.HasCorruption() {
+		return fmt.Errorf("a cópia de trabalho foi criada, mas o Firebird não conseguiu abri-la com segurança: %w", copyCheckErr)
+	}
+	if toolOutputHasOperationalFailure(copyCheckOutput) && !copyStats.HasCorruption() {
+		return errors.New("a cópia de trabalho foi criada, mas não ficou acessível ao serviço Firebird; escolha uma pasta de backup acessível ao serviço")
+	}
+	stats = mergeRecoveryStats(stats, copyStats)
+	report.Diagnostic = stats
+	report.PreMendDiagnostic = stats
+	if readOnlyOnOriginal {
+		report.action("Cópia de trabalho conferida em modo somente leitura antes do reparo")
+	} else {
+		report.action("Diagnóstico estrutural executado somente na cópia porque o gfix legado não reconheceu -no_update")
+		appendLog("Diagnóstico na cópia: " + stats.Summary() + ".")
+	}
+
+	needsRecoveryFlags := stats.HasCorruption() && !stats.IndexOnly()
+	if stats.IndexOnly() {
+		appendLog("Corrupção restrita a índices: o Toolbox evitará mend; backup/restore tentará reconstruí-los.")
+		report.action("Mend não executado porque os erros reportados estão restritos a índices")
+	} else if stats.HasCorruption() {
+		msg := "O diagnóstico encontrou corrupção que pode envolver perda de dados.\n\n" + stats.Summary() + "\n\nO Toolbox já criou uma cópia de trabalho e NÃO executará mend no arquivo original.\n\nDeseja tentar recuperação pesada na cópia?\n\nO gfix -mend pode descartar registros ou páginas que não consegue recuperar."
+		if messageBox("Recuperação pesada", msg, MB_YESNO|MB_ICONWARNING) != IDYES {
+			report.FinalState = "DIAGNÓSTICO CONCLUÍDO; REPARO PESADO NÃO AUTORIZADO"
+			return errors.New("recuperação pesada cancelada; banco original preservado e relatório gerado")
+		}
+		setStatus("Preparando cópia corrompida para resgate...")
+		setProgress(40, "Preparando cópia para resgate...")
+		validationOut, validationErr := runRecoveryCapture(ctx, "Etapa 3: Validação de recuperação ignorando checksums...", gfix, "-user", c.User, "-pass", c.Password, "-v", "-full", "-ignore", workingConn)
+		if validationErr != nil && !parseRecoveryStats(validationOut).HasCorruption() {
+			report.warning("gfix -validate -full -ignore retornou erro antes do mend")
+		}
+		mendOutput, mendErr := runRecoveryCapture(ctx, "Etapa 4: Executando gfix -mend -ignore SOMENTE na cópia...", gfix, gfixMendArgs(c.User, c.Password, workingConn)...)
+		mendStats := parseRecoveryStats(mendOutput)
+		if toolOutputHasOperationalFailure(mendOutput) || (mendErr != nil && !mendStats.HasCorruption()) {
+			if mendErr != nil {
+				return fmt.Errorf("gfix -mend não conseguiu preparar a cópia para backup: %w", mendErr)
+			}
+			return errors.New("gfix -mend não conseguiu preparar a cópia para backup; consulte o log técnico")
+		}
+		report.action("gfix -mend -ignore executado somente na cópia de trabalho")
+		if mendStats.HasCorruption() {
+			report.warning("O mend reportou perdas/erros: " + mendStats.Summary())
+			appendLog("ATENÇÃO durante mend: " + mendStats.Summary() + ".")
+		}
+
+		postArgs := []string{"-user", c.User, "-pass", c.Password, "-v", "-full", "-ignore"}
+		if readOnlyOnOriginal {
+			postArgs = append(postArgs, "-no_update")
+		}
+		postArgs = append(postArgs, workingConn)
+		postOutput, postErr := runRecoveryCapture(ctx, "Etapa 4b: Revalidando a cópia após o mend...", gfix, postArgs...)
+		postStats := parseRecoveryStats(postOutput)
+		report.PostMendDiagnostic = postStats
+		report.PostMendChecked = true
+		report.action("Cópia revalidada após o mend para comparar corrupção antes/depois")
+		appendLog("Pós-mend: " + postStats.Summary() + ".")
+		if postErr != nil && !postStats.HasCorruption() {
+			report.warning("A revalidação pós-mend terminou com erro operacional; consulte o log técnico")
+		}
+	} else {
+		appendLog("✓ Diagnóstico não reportou corrupção estrutural; o fluxo avançado seguirá com backup e restore de teste.")
+	}
+
+	setStatus("Gerando backup de recuperação...")
+	setProgress(55, "Gerando backup de recuperação...")
+	usedLimbo := false
+	backupArgs := advancedBackupArgs(c, workingConn, backup, needsRecoveryFlags, false)
+	backupOutput, backupErr := runRecoveryCapture(ctx, "Etapa 5: Gerando backup de recuperação...", gbak, backupArgs...)
+	if backupErr != nil && report.LimboCount > 0 {
+		if messageBox("Backup bloqueado", "O backup falhou e existem transações em limbo.\n\nDeseja repetir o backup usando -limbo para ignorar essas transações?\n\nAs transações em limbo não serão resolvidas; apenas serão ignoradas neste backup de resgate.", MB_YESNO|MB_ICONWARNING) == IDYES {
+			_ = os.Remove(backup)
+			usedLimbo = true
+			backupOutput, backupErr = runRecoveryCapture(ctx, "Repetindo backup com -limbo...", gbak, advancedBackupArgs(c, workingConn, backup, needsRecoveryFlags, true)...)
+			report.action("Backup repetido com -limbo por decisão do usuário")
+		}
+	}
+
+	if backupErr != nil || !fileExists(backup) {
+		report.BackupFailureDetails = relevantGbakFailureLines(backupOutput, 48)
+		report.SuspectedRelation = suspectedRelationFromGbak(backupOutput)
+		if report.SuspectedRelation != "" {
+			appendLog("Possível relação afetada pelo erro do gbak: " + report.SuspectedRelation)
+		}
+		if report.BackupFailureDetails != "" && !detailedLog {
+			appendLog("Falha do backup - mensagens relevantes:")
+			appendLog(report.BackupFailureDetails)
+		}
+
+		metaBackup := metadataBackupPath(backup)
+		_ = os.Remove(metaBackup)
+		metaOutput, metaErr := runRecoveryCapture(ctx, "Tentando preservar somente os metadados do banco...", gbak, metadataBackupArgs(c, workingConn, metaBackup)...)
+		if metaErr == nil && fileExists(metaBackup) {
+			report.MetadataBackup = metaBackup
+			report.action("Backup somente de metadados criado após a falha do backup completo")
+			appendLog("✓ Metadados preservados: " + metaBackup)
+		} else {
+			report.warning("Não foi possível criar o backup somente de metadados")
+			if details := relevantGbakFailureLines(metaOutput, 16); details != "" {
+				report.warning("Falha do backup de metadados: " + strings.ReplaceAll(details, "\n", " | "))
+			}
+		}
+
+		// Antes de excluir dados de uma relação inteira, tenta a estratégia menos
+		// invasiva para o caso clássico de corrupção de página de índice: desativa
+		// apenas índices de usuário que não sustentam constraints, sempre na cópia
+		// de trabalho, e repete o gbak. Se funcionar, nenhum registro é descartado.
+		if backupErr != nil && normalizeSkipData(c.SkipData) == "" && safeRelationForSkip(report.SuspectedRelation) && gbakLooksLikeIndexCorruption(backupOutput) {
+			report.IndexRescueAttempted = true
+			meta, metaErr := loadRelationMetadata(ctx, c, resolvedPort, workingCopy, report.SuspectedRelation)
+			if metaErr == nil {
+				disabled := deactivateRelationIndexes(ctx, c, resolvedPort, workingCopy, meta)
+				report.IndexesDisabled = append(report.IndexesDisabled, disabled...)
+				if len(disabled) > 0 {
+					appendLog("Tentando novo backup após desativar índices não vinculados a constraints em " + report.SuspectedRelation + "...")
+					_ = os.Remove(backup)
+					indexOutput, indexErr := runRecoveryCapture(ctx, "Repetindo backup após isolar índices da relação...", gbak, advancedBackupArgs(c, workingConn, backup, needsRecoveryFlags, usedLimbo)...)
+					if indexErr == nil && fileExists(backup) {
+						backupErr = nil
+						backupOutput = indexOutput
+						report.action("Backup completo obtido após desativar índices não vinculados a constraints somente na cópia de trabalho")
+						report.warning("O backup foi obtido com índices de usuário temporariamente inativos na cópia; o restore de teste confirmará a reconstrução antes do uso")
+						appendLog("✓ Backup completo obtido sem excluir os dados de " + report.SuspectedRelation + ".")
+					} else {
+						report.warning("A tentativa de preservar todos os registros desativando índices não vinculados a constraints não resolveu a falha")
+						if details := relevantGbakFailureLines(indexOutput, 24); details != "" {
+							report.BackupFailureDetails += "\n\nTentativa após desativar índices:\n" + details
+						}
+					}
+				} else {
+					report.warning("A falha parece envolver índice, mas não havia índice de usuário não vinculado a constraint que pudesse ser desativado com segurança")
+				}
+			} else {
+				report.warning("Não foi possível ler os metadados da relação para a tentativa de resgate por índices: " + metaErr.Error())
+			}
+		}
+
+		if backupErr != nil && versionNumber(c.SourceVersion) >= 3.0 && normalizeSkipData(c.SkipData) == "" && safeRelationForSkip(report.SuspectedRelation) {
+			skipRegex := sqlRegexLiteral(report.SuspectedRelation)
+			msg := "O gbak continua falhando ao processar a relação:\n\n" + report.SuspectedRelation + "\n\nO Toolbox pode criar um backup-base sem os dados dessa relação e, em seguida, tentar copiar de volta os registros legíveis para um banco temporário limpo.\n\nPrimeiro será usado -skip_data apenas como etapa intermediária. Depois o Toolbox tentará recuperar os registros da tabela por leitura NATURAL e, se necessário, por faixas da chave primária.\n\nDeseja iniciar esse resgate?"
+			if messageBox("Tentativa de recuperação parcial", msg, MB_YESNO|MB_ICONWARNING) == IDYES {
+				partialConfig := c
+				partialConfig.SkipData = skipRegex
+				_ = os.Remove(backup)
+				appendLog("Criando backup-base sem os dados de " + report.SuspectedRelation + " para tentar o resgate dos registros...")
+				partialOutput, partialErr := runRecoveryCapture(ctx, "Repetindo backup com -skip_data "+skipRegex+"...", gbak, advancedBackupArgs(partialConfig, workingConn, backup, needsRecoveryFlags, usedLimbo)...)
+				if partialErr == nil && fileExists(backup) {
+					backupErr = nil
+					backupOutput = partialOutput
+					report.SkipData = skipRegex
+					report.PartialRecovery = true
+					baseBackup := basePartialBackupPath(backup, report.SuspectedRelation)
+					_ = os.Remove(baseBackup)
+					if renameErr := os.Rename(backup, baseBackup); renameErr != nil {
+						baseBackup = backup
+						report.warning("Não foi possível renomear o backup-base para identificação forense: " + renameErr.Error())
+					}
+					report.BasePartialBackup = baseBackup
+					report.warning("Backup-base criado com -skip_data para permitir tentativa de resgate dos registros de " + report.SuspectedRelation)
+					report.action("Backup-base criado com -skip_data preservando as demais tabelas")
+					appendLog("✓ Backup-base criado. Tentando recuperar os registros de " + report.SuspectedRelation + "...")
+
+					rowResult, rowErr := attemptRowRescue(ctx, c, resolvedPort, workingCopy, baseBackup, backup, report.SuspectedRelation, report.IndexesDisabled)
+					report.RowRescueAttempted = rowResult.Attempted
+					report.RowRescueRelation = report.SuspectedRelation
+					report.RowRescueRecovered = rowResult.Recovered
+					report.RowRescueLostKeys = append(report.RowRescueLostKeys, rowResult.LostKeys...)
+					report.RowRescueComplete = rowResult.Complete
+					report.RowRescueStage = rowResult.StagePath
+					if rowErr == nil && rowResult.Backup != "" && fileExists(rowResult.Backup) {
+						backup = rowResult.Backup
+						backupErr = nil
+						report.action(fmt.Sprintf("Resgate de registros de %s concluído: %d registro(s) copiado(s)", report.SuspectedRelation, rowResult.Recovered))
+						if rowResult.Complete {
+							report.PartialRecovery = false
+							report.SkipData = ""
+							report.warning("O -skip_data foi usado apenas no backup-base intermediário; os registros da relação foram reinseridos no banco limpo antes do backup final")
+							appendLog(fmt.Sprintf("✓ %d registro(s) de %s recuperados. Nenhuma chave foi perdida.", rowResult.Recovered, report.SuspectedRelation))
+						} else {
+							report.PartialRecovery = true
+							report.SkipData = ""
+							report.warning(fmt.Sprintf("Resgate parcial de %s: %d registro(s) recuperado(s), %d chave(s) não recuperada(s)", report.SuspectedRelation, rowResult.Recovered, len(rowResult.LostKeys)))
+							appendLog(fmt.Sprintf("ATENÇÃO: %d registro(s) recuperado(s) de %s; %d chave(s) não puderam ser copiadas.", rowResult.Recovered, report.SuspectedRelation, len(rowResult.LostKeys)))
+							if messageBox("Resgate parcial de registros", fmt.Sprintf("Foram recuperados %d registros de %s, mas %d chave(s) não puderam ser copiadas.\n\nDeseja continuar com esta recuperação parcial?", rowResult.Recovered, report.SuspectedRelation, len(rowResult.LostKeys)), MB_YESNO|MB_ICONWARNING) != IDYES {
+								backupErr = errors.New("recuperação parcial de registros não autorizada pelo usuário")
+							}
+						}
+					} else {
+						if rowErr == nil {
+							rowErr = errors.New("o resgate terminou sem gerar o backup pós-resgate esperado")
+						}
+						report.warning("O backup-base foi criado, mas o resgate automático dos registros falhou: " + rowErr.Error())
+						appendLog("ATENÇÃO: não foi possível recuperar os registros automaticamente: " + rowErr.Error())
+						if messageBox("Resgate dos registros falhou", "O restante do banco foi preservado, mas o resgate automático dos registros de "+report.SuspectedRelation+" falhou.\n\nDeseja continuar usando o backup-base SEM os dados dessa relação?", MB_YESNO|MB_ICONWARNING) != IDYES {
+							backupErr = rowErr
+						} else {
+							backup = baseBackup
+							report.warning("Usuário optou por continuar com o backup-base sem os dados da relação após falha do resgate")
+							report.PartialRecovery = true
+						}
+					}
+				} else {
+					report.warning("A tentativa automática com -skip_data também falhou")
+					if details := relevantGbakFailureLines(partialOutput, 32); details != "" {
+						report.BackupFailureDetails += "\n\nTentativa com -skip_data:\n" + details
+					}
+					backupErr = partialErr
+				}
+			} else {
+				report.warning("Tentativa de backup-base e resgate de registros não autorizada pelo usuário; nenhum dado foi excluído automaticamente")
+			}
+		}
+	}
+
+	if backupErr != nil || !fileExists(backup) {
+		if versionNumber(c.SourceVersion) >= 3.0 && normalizeSkipData(c.SkipData) == "" && report.SuspectedRelation == "" {
+			report.warning("O backup falhou e não foi possível identificar automaticamente uma relação específica; use o log técnico para localizar a tabela e, se apropriado, informe-a em 'Pular tabelas (regex)'.")
+		}
+		report.FinalState = "NÃO RECUPERÁVEL COM FERRAMENTAS PADRÃO"
+		if report.MetadataBackup != "" {
+			report.FinalState += "; METADADOS PRESERVADOS"
+		}
+		if report.SuspectedRelation != "" {
+			return fmt.Errorf("backup de recuperação falhou; possível relação afetada: %s. Metadados e logs foram preservados para a próxima tentativa", report.SuspectedRelation)
+		}
+		return errors.New("nem gfix/gbak conseguiram produzir um backup de dados utilizável; preserve o original, a cópia, os metadados e o log técnico para recuperação de baixo nível")
+	}
+
+	report.action("Backup de recuperação criado")
+	report.Backup = backup
+	setLastBackup(backup)
+	appendLog("✓ Backup de recuperação criado: " + backup)
+
+	setStatus("Validando o backup com restore de teste...")
+	testResult, testErr := verifyBackupByRestore(ctx, c, backup, testPath, &report)
+	if testErr != nil {
+		if testResult.Partial {
+			report.TestRestoreState = "PARCIAL - banco preservado para inspeção"
+			if report.FinalState == "" {
+				report.FinalState = "RECUPERAÇÃO PARCIAL DISPONÍVEL PARA INSPEÇÃO; RESTORE NÃO COMPLETO"
+			}
+		} else {
+			report.TestRestoreState = "FALHOU"
+			if report.FinalState == "" {
+				report.FinalState = "BACKUP CRIADO MAS NÃO VALIDADO"
+			}
+		}
+		return testErr
+	}
+	if testResult.Backup != "" && !strings.EqualFold(filepath.Clean(testResult.Backup), filepath.Clean(backup)) {
+		backup = testResult.Backup
+		report.Backup = backup
+		setLastBackup(backup)
+		report.action("Backup saneado substituiu o backup intermediário após novo restore de teste aprovado")
+	}
+	report.TestRestoreState = "VERIFICADO COM SUCESSO"
+	report.TestODS = testResult.Header.ODS
+	report.TestDialect = testResult.Header.Dialect
+	report.TestPageSize = testResult.Header.PageSize
+	if testResult.Header.ODS != "" || testResult.Header.Dialect != "" || testResult.Header.PageSize != "" {
+		setLastHeader(testResult.Header)
+	}
+	if testResult.Header.ODS != "" {
+		appendLog("✓ Backup verificado por restore real | ODS " + testResult.Header.ODS + " | Dialeto " + testResult.Header.Dialect + ".")
+	} else {
+		appendLog("✓ Backup verificado por uma restauração real.")
+	}
+	setProgress(86, "Backup verificado")
+
+	if c.TargetVersion != "" {
+		if fileExists(c.Dest) {
+			if messageBox("Destino existente", "O arquivo de destino já existe.\n\nO backup já foi verificado por restore de teste. Deseja continuar e substituir/restaurar o destino?", MB_YESNO|MB_ICONWARNING) != IDYES {
+				report.warning("Restauração final cancelada; backup verificado foi preservado")
+				if report.PartialRecovery {
+					report.FinalState = "RECUPERAÇÃO PARCIAL VERIFICADA; RESTAURAÇÃO FINAL CANCELADA"
+				} else {
+					report.FinalState = "BACKUP COMPLETO RECUPERADO E VERIFICADO; RESTAURAÇÃO FINAL CANCELADA"
+				}
+				return nil
+			}
+		}
+		setProgress(90, "Restaurando destino final...")
+		if err := restoreBackup(ctx, c, backup); err != nil {
+			if report.PartialRecovery {
+				report.FinalState = "BACKUP PARCIAL VERIFICADO; FALHA NA RESTAURAÇÃO FINAL"
+			} else {
+				report.FinalState = "BACKUP COMPLETO VERIFICADO; FALHA NA RESTAURAÇÃO FINAL"
+			}
+			return err
+		}
+		if len(report.IndexesDisabled) > 0 && !report.DuplicateRepairApplied {
+			version, root, port := testRestoreEngine(c)
+			resolved := port
+			if supportsServiceManagerRestore(version) {
+				if p, resolveErr := verifyFirebirdEndpoint(ctx, "da reativação final de índices", version, root, "", port); resolveErr == nil {
+					resolved = p
+				}
+			}
+			if _, activeErr := runISQLScript(ctx, root, version, resolved, c.User, c.Password, c.Dest, "Reativando índices no banco final...", buildAlterIndexesScript(report.IndexesDisabled, true)); activeErr != nil {
+				report.FinalState = "RESTAURAÇÃO FINAL CRIADA, MAS ÍNDICES NÃO FORAM REATIVADOS"
+				return fmt.Errorf("o banco final foi restaurado, mas não foi possível reativar os índices: %w", activeErr)
+			}
+			report.action("Índices reconstruídos/reativados no banco final")
+		}
+		report.action("Restauração final concluída no Firebird " + c.TargetVersion)
+		if report.PartialRecovery {
+			if report.DuplicateRepairApplied && report.DuplicateRowsRemoved > 0 {
+				report.FinalState = fmt.Sprintf("RECUPERAÇÃO PARCIAL CONCLUÍDA; %d DUPLICIDADE(S) DE CHAVE RESOLVIDA(S) COM DECISÃO EXPLÍCITA", report.DuplicateRowsRemoved)
+			} else if report.RowRescueAttempted && len(report.RowRescueLostKeys) > 0 {
+				report.FinalState = fmt.Sprintf("RECUPERAÇÃO PARCIAL CONCLUÍDA; %d CHAVE(S) NÃO RECUPERADA(S) EM %s", len(report.RowRescueLostKeys), report.RowRescueRelation)
+			} else if report.SkipData != "" {
+				report.FinalState = "RECUPERAÇÃO PARCIAL CONCLUÍDA; DADOS EXCLUÍDOS: " + report.SkipData
+			} else {
+				report.FinalState = "RECUPERAÇÃO PARCIAL CONCLUÍDA"
+			}
+		} else if report.DuplicateRepairApplied && report.DuplicateRowsRemoved > 0 {
+			report.FinalState = fmt.Sprintf("RECUPERAÇÃO COMPLETA CONCLUÍDA; %d DUPLICIDADE(S) ESTRUTURAL(IS) DE CHAVE REMOVIDA(S)", report.DuplicateRowsRemoved)
+		} else if report.RowRescueAttempted && report.RowRescueComplete {
+			report.FinalState = fmt.Sprintf("RECUPERAÇÃO COMPLETA CONCLUÍDA; %d REGISTRO(S) DE %s RESGATADO(S)", report.RowRescueRecovered, report.RowRescueRelation)
+		} else {
+			report.FinalState = "RECUPERAÇÃO COMPLETA CONCLUÍDA"
+		}
+	} else {
+		if report.PartialRecovery {
+			if report.DuplicateRepairApplied && report.DuplicateRowsRemoved > 0 {
+				report.FinalState = fmt.Sprintf("BACKUP PARCIAL CRIADO E VERIFICADO; %d DUPLICIDADE(S) DE CHAVE RESOLVIDA(S) COM DECISÃO EXPLÍCITA", report.DuplicateRowsRemoved)
+			} else if report.RowRescueAttempted && len(report.RowRescueLostKeys) > 0 {
+				report.FinalState = fmt.Sprintf("BACKUP PARCIAL CRIADO E VERIFICADO; %d CHAVE(S) NÃO RECUPERADA(S) EM %s", len(report.RowRescueLostKeys), report.RowRescueRelation)
+			} else if report.SkipData != "" {
+				report.FinalState = "BACKUP PARCIAL DE RECUPERAÇÃO CRIADO E VERIFICADO; DADOS EXCLUÍDOS: " + report.SkipData
+			} else {
+				report.FinalState = "BACKUP PARCIAL DE RECUPERAÇÃO CRIADO E VERIFICADO"
+			}
+		} else if report.DuplicateRepairApplied && report.DuplicateRowsRemoved > 0 {
+			report.FinalState = fmt.Sprintf("BACKUP COMPLETO CRIADO E VERIFICADO; %d DUPLICIDADE(S) ESTRUTURAL(IS) DE CHAVE REMOVIDA(S)", report.DuplicateRowsRemoved)
+		} else if report.RowRescueAttempted && report.RowRescueComplete {
+			report.FinalState = fmt.Sprintf("BACKUP COMPLETO CRIADO E VERIFICADO; %d REGISTRO(S) DE %s RESGATADO(S)", report.RowRescueRecovered, report.RowRescueRelation)
+		} else {
+			report.FinalState = "BACKUP COMPLETO DE RECUPERAÇÃO CRIADO E VERIFICADO"
+		}
+	}
+	return nil
+}
+
+func runRepair(ctx context.Context, c workflowConfig, advanced bool) error {
+	if advanced {
+		return runAdvancedRecovery(ctx, c)
+	}
+	gfix := firebirdExe(c.FbSource, c.SourceVersion, "gfix.exe")
+	gbak := firebirdExe(c.FbSource, c.SourceVersion, "gbak.exe")
+	backup := backupFilePath(c)
+
+	resolvedPort, endpointErr := verifyFirebirdEndpoint(ctx, "da rotina", c.SourceVersion, c.FbSource, c.Service, c.SourcePort)
+	if endpointErr != nil {
+		return endpointErr
+	}
+	dbConn := databaseConnection(resolvedPort, c.Source)
+
+	setStatus("Validando banco com Firebird " + c.SourceVersion + "...")
+	setProgress(12, "Validando banco...")
+	validationOutput, validationErr := runRecoveryCapture(ctx, "Etapa 1: Validando banco...", gfix, "-user", c.User, "-pass", c.Password, "-v", "-full", dbConn)
+	validationStats := parseRecoveryStats(validationOutput)
+	if validationErr != nil || validationStats.HasCorruption() || toolOutputHasOperationalFailure(validationOutput) {
+		return fmt.Errorf("a validação encontrou problema; use 'Corrigir banco (avançado)' para diagnóstico seguro e recuperação")
+	}
+	appendLog("✓ Banco validado.")
+	setProgress(25, "Banco validado")
+
+	setStatus("Executando sweep...")
+	setProgress(32, "Executando sweep...")
+	sweepOutput, sweepErr := runRecoveryCapture(ctx, "Etapa 2: Executando sweep...", gfix, "-user", c.User, "-pass", c.Password, "-sweep", dbConn)
+	if sweepErr != nil {
+		return fmt.Errorf("falha ao executar sweep: %w", sweepErr)
+	}
+	if toolOutputHasOperationalFailure(sweepOutput) {
+		return errors.New("falha ao executar sweep; o Firebird antigo reportou erro na saída mesmo com código de retorno zero")
+	}
+	appendLog("✓ Sweep concluído.")
+	setProgress(43, "Sweep concluído")
+
+	setStatus("Gerando backup...")
+	setProgress(50, "Gerando backup...")
+	if err := runCommand(ctx, "Etapa 3: Gerando backup...", gbak, "-b", "-v", "-user", c.User, "-pass", c.Password, dbConn, backup); err != nil {
+		return fmt.Errorf("falha ao gerar backup: %w", err)
+	}
+	if !fileExists(backup) {
+		return fmt.Errorf("o gbak terminou sem criar o backup esperado: %s", backup)
+	}
+	appendLog("✓ Backup criado: " + backup)
+	setLastBackup(backup)
+	setProgress(62, "Backup criado")
+
+	if c.TargetVersion == "" {
+		setStatus("Correção concluída; backup gerado com sucesso.")
+		return nil
+	}
+
+	if fileExists(c.Dest) {
+		if messageBox("Destino existente", "O arquivo de destino já existe.\n\nA restauração pode substituir o arquivo. Deseja continuar?", MB_YESNO|MB_ICONWARNING) != IDYES {
+			appendLog("Restauração cancelada; o backup foi preservado em: " + backup)
+			return nil
+		}
+	}
+	return restoreBackup(ctx, c, backup)
+}
+
+func runRestoreOnly(ctx context.Context, c workflowConfig) error {
+	if c.TargetVersion == "" {
+		return errors.New("selecione a versão de restauração")
+	}
+	if fileExists(c.Dest) {
+		if messageBox("Destino existente", "O arquivo de destino já existe.\n\nDeseja continuar com a restauração?", MB_YESNO|MB_ICONWARNING) != IDYES {
+			return errors.New("restauração cancelada pelo usuário")
+		}
+	}
+	return restoreBackup(ctx, c, c.Source)
+}
+
+func executeWorkflow() {
+	c := collectConfig()
+	if err := validateConfig(c); err != nil {
+		messageBox("Firebird Toolbox", err.Error()+".", MB_OK|MB_ICONWARNING)
+		return
+	}
+
+	if c.Routine.Kind == routineRepair || c.Routine.Kind == routineRepairAdvanced {
+		text := "Feche os sistemas conectados ao banco antes de continuar."
+		if c.Routine.Kind == routineRepairAdvanced {
+			text = "O modo avançado fará diagnóstico profundo somente leitura, criará uma cópia de trabalho com SHA-256 e executará qualquer mend/reparo pesado somente nessa cópia.\n\nSe o backup falhar em uma relação, o Toolbox tentará primeiro contornar índices corrompidos sem excluir dados. Se ainda for necessário usar -skip_data como base intermediária, tentará recolocar os registros legíveis da tabela por leitura NATURAL e, quando possível, isolar somente as chaves irrecuperáveis.\n\nTodo backup final passará por restore de teste antes de ser considerado válido.\n\n" + text
+		} else {
+			text = "A rotina executará validação, sweep e backup do banco.\n\n" + text
+		}
+		if c.TargetVersion != "" {
+			text += "\n\nDepois, o backup será restaurado com Firebird " + c.TargetVersion + "."
+		}
+		if c.Routine.Kind == routineRepairAdvanced && versionNumber(c.SourceVersion) >= 3.0 && normalizeSkipData(c.SkipData) != "" {
+			text += "\n\nATENÇÃO: o campo Pular tabelas está preenchido. Os dados das tabelas que corresponderem à regex NÃO entrarão no backup de recuperação."
+		}
+		if messageBox("Confirmar rotina", text+"\n\nDeseja executar agora?", MB_YESNO|MB_ICONWARNING) != IDYES {
+			return
+		}
+	}
+
+	if (c.Routine.Kind == routineRepair || c.Routine.Kind == routineRepairAdvanced) && isBackwardMigration(c.SourceVersion, c.TargetVersion) {
+		msg := "A versão de destino é anterior à versão usada para gerar o backup.\n\n" +
+			"Firebird " + c.SourceVersion + " -> Firebird " + c.TargetVersion + "\n\n" +
+			"Migrações para versões anteriores não têm compatibilidade garantida e podem falhar se o banco usar recursos ou metadados mais novos.\n\nDeseja tentar mesmo assim?"
+		if messageBox("Migração para versão anterior", msg, MB_YESNO|MB_ICONWARNING) != IDYES {
+			return
+		}
+	}
+
+	clearLog()
+	resetRunResult()
+	appendLog("Iniciando rotina: " + c.Routine.Name)
+	if c.Routine.Kind != routineRestore {
+		appendLog("Firebird da rotina: " + c.SourceVersion + " | Porta: " + c.SourcePort)
+	}
+	if c.TargetVersion != "" {
+		appendLog("Restaurar para: Firebird " + c.TargetVersion + " | Porta: " + c.TargetPort)
+	}
+	appendLog("Origem: " + c.Source)
+	if detailedLog {
+		appendLog("Log técnico: detalhado (gbak com saída verbose).")
+	} else {
+		appendLog("Log: resumido. Apenas etapas, avisos, erros e resultado final serão exibidos.")
+	}
+	if c.Dest != "" {
+		appendLog("Destino: " + c.Dest)
+	}
+	if c.Routine.Kind == routineRepairAdvanced && versionNumber(c.SourceVersion) >= 3.0 && normalizeSkipData(c.SkipData) != "" {
+		appendLog("Recuperação: -skip_data " + normalizeSkipData(c.SkipData))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runMu.Lock()
+	currentCancel = cancel
+	runMu.Unlock()
+	setRunning(true)
+	setStatus("Executando " + c.Routine.Name + "...")
+
+	go func() {
+		defer func() {
+			cancel()
+			runMu.Lock()
+			currentCancel = nil
+			runMu.Unlock()
+			setRunning(false)
+		}()
+
+		var err error
+		switch c.Routine.Kind {
+		case routineRepair:
+			err = runRepair(ctx, c, false)
+		case routineRepairAdvanced:
+			err = runRepair(ctx, c, true)
+		case routineRestore:
+			err = runRestoreOnly(ctx, c)
+		}
+
+		if errors.Is(err, context.Canceled) {
+			appendLog("Rotina interrompida pelo usuário.")
+			setStatus("Rotina interrompida.")
+			setText(idResult, "■ Interrompido")
+			setTerminalProgress(PBST_PAUSED, "Interrompido pelo usuário")
+			return
+		}
+		if err != nil {
+			appendLog("ERRO: " + err.Error())
+			state := strings.ToUpper(recoveryStateSnapshot())
+			if strings.Contains(state, "AGUARDANDO DECISÃO") || strings.Contains(state, "PARCIAL") {
+				if strings.Contains(state, "AGUARDANDO DECISÃO") {
+					setStatus("Conflito de dados preservado; decisão manual necessária.")
+					setText(idResult, "⚠ Conflito aguardando decisão")
+					setTerminalProgress(PBST_PAUSED, "Aguardando decisão manual")
+					messageBox("Recuperação aguardando decisão", failureSummary(err), MB_OK|MB_ICONWARNING)
+				} else {
+					setStatus("Recuperação parcial disponível; revise o relatório.")
+					setText(idResult, "⚠ Recuperação parcial")
+					setTerminalProgress(PBST_PAUSED, "Recuperação parcial disponível")
+					messageBox("Recuperação parcial", failureSummary(err), MB_OK|MB_ICONWARNING)
+				}
+			} else {
+				setStatus("Rotina encerrada com erro. Consulte o log.")
+				setText(idResult, "⚠ Erro na rotina")
+				setTerminalProgress(PBST_ERROR, "Encerrado com erro")
+				messageBox("Erro na rotina", failureSummary(err), MB_OK|MB_ICONERROR)
+			}
+			return
+		}
+		state := strings.ToUpper(recoveryStateSnapshot())
+		dialogText, compact := successSummary(c)
+		setText(idResult, compact)
+		if strings.Contains(state, "PARCIAL") {
+			setTerminalProgress(PBST_PAUSED, "Recuperação parcial concluída")
+			appendLog("⚠ Recuperação parcial concluída. Consulte o relatório antes de usar o banco.")
+			setStatus("Recuperação parcial concluída; revise o relatório.")
+			messageBox("⚠ Recuperação parcial", dialogText, MB_OK|MB_ICONWARNING)
+		} else {
+			setTerminalProgress(PBST_NORMAL, "Concluído com sucesso")
+			appendLog("\u2713 Rotina concluída com sucesso.")
+			setStatus("Concluído com sucesso.")
+			messageBox("✓ Rotina concluída", dialogText, MB_OK|MB_ICONINFO)
+		}
+	}()
+}
+
+func stopWorkflow() {
+	runMu.Lock()
+	cancel := currentCancel
+	active := running
+	runMu.Unlock()
+	if !active || cancel == nil {
+		return
+	}
+	if messageBox("Interromper rotina", "Deseja interromper a rotina em execução?", MB_YESNO|MB_ICONWARNING) != IDYES {
+		return
+	}
+	appendLog("Solicitada interrupcao da rotina...")
+	setStatus("Interrompendo...")
+	cancel()
+}
+
+func helpText() string {
+	return strings.TrimSpace(`FIREBIRD TOOLBOX - AJUDA
+
+VISÃO GERAL
+O Firebird Toolbox centraliza manutenção, correção, restauração e recuperação de bancos Firebird. O programa executa as ferramentas oficiais gfix, gbak e gstat e mantém o log dentro da própria interface.
+
+1. INÍCIO RÁPIDO
+1) Escolha a rotina.
+2) Informe a versão do Firebird que abrirá o banco de origem.
+3) Se desejar restauração, escolha "Restaurar para".
+4) Selecione o banco de origem, o destino e a pasta de backup.
+5) Confira os caminhos do Firebird, as portas e as credenciais.
+6) Clique em Executar e acompanhe o progresso e o log.
+
+2. ROTINAS
+Corrigir banco
+- Valida o banco, executa sweep, gera backup e, quando selecionado, restaura em outra instância/versão.
+- É o modo recomendado para manutenção normal e bancos sem corrupção pesada.
+
+Corrigir banco (avançado)
+- Indicado para corrupção real, erros de página, BLOB, índice ou falhas de gbak.
+- Começa com diagnóstico somente leitura quando a versão suporta esse recurso.
+- Cria uma cópia de trabalho antes de qualquer reparo destrutivo.
+- O gfix -mend, quando necessário e autorizado, é executado somente na cópia de trabalho.
+- Gera backup de recuperação, executa restore real de teste e cria relatório técnico.
+- Se a falha parecer estar em índice, tenta primeiro preservar todos os dados desativando apenas índices de usuário não ligados a constraints na cópia de trabalho.
+- Se uma relação específica continuar impedindo o backup, usa -skip_data apenas como base intermediária e tenta recolocar os registros legíveis no banco limpo.
+- A recuperação dos registros começa com leitura NATURAL, evitando índices corrompidos. Se necessário e houver chave primária numérica simples, o Toolbox divide a faixa da chave até isolar registros que realmente não podem ser lidos.
+- Se o restore falhar ao ativar uma PRIMARY KEY/UNIQUE por chave duplicada, o Toolbox NÃO usa -one_at_a_time: refaz a restauração com todos os índices inativos, preserva uma cópia para auditoria, identifica a chave problemática e compara as ocorrências.
+- Duplicidades logicamente idênticas podem ser saneadas automaticamente na cópia de trabalho, mantendo uma ocorrência. Se houver campos diferentes ou comparação inconclusiva, o Toolbox exige confirmação explícita antes de manter uma ocorrência e preserva todas as versões no banco/relatório de conflitos.
+- Depois do saneamento, todos os índices são reconstruídos, um novo backup é criado e o restore de teste completo é repetido.
+
+Somente restaurar
+- Restaura um arquivo .BAK/.FBK para o banco de destino usando a versão selecionada.
+
+3. VERSÕES DO FIREBIRD
+São oferecidas as linhas 1.0, 1.5, 2.0, 2.1, 2.5, 3.0, 4.0 e 5.0.
+- O Toolbox procura gbak.exe, gfix.exe e gstat.exe na raiz e/ou pasta bin, conforme a versão.
+- Restaurar para uma versão posterior é o caminho mais comum de migração.
+- Restaurar para uma versão anterior pode falhar por incompatibilidade de metadados ou recursos. O Toolbox avisa, mas não pode garantir a conversão regressiva.
+
+4. CAMPO "PULAR TABELAS (REGEX)"
+Disponível no modo avançado para Firebird 3.0 ou superior.
+- Usa a opção gbak -skip_data.
+- Exclui os DADOS das relações correspondentes, mas preserva a estrutura/metadados.
+- Deve ser usado manualmente apenas quando você realmente deseja excluir os dados correspondentes.
+- Quando o Toolbox identifica uma relação suspeita automaticamente, o -skip_data passa a ser uma etapa intermediária: depois ele tenta recuperar os registros da relação e gerar um novo backup com os dados recuperados.
+- Se todos os registros forem reinseridos e o novo backup passar no restore de teste, o resultado pode voltar a ser RECUPERAÇÃO COMPLETA.
+- Se algumas chaves não puderem ser recuperadas, o resultado é RECUPERAÇÃO PARCIAL e o relatório lista essas chaves.
+
+5. RESULTADOS DA RECUPERAÇÃO
+RECUPERAÇÃO COMPLETA
+- Backup criado, restore de teste aprovado e nenhum dado foi excluído deliberadamente.
+
+RECUPERAÇÃO PARCIAL
+- O banco foi restaurado e validado, mas alguma relação continuou sem todos os registros originais ou uma duplicidade com conteúdo diferente/inconclusivo foi resolvida por decisão explícita do usuário.
+- Quando o resgate por chave primária foi possível, o relatório informa quantos registros foram recuperados e quais chaves não puderam ser copiadas.
+- Revise obrigatoriamente o relatório antes de colocar o banco em produção.
+
+BACKUP CRIADO MAS NÃO VALIDADO
+- Existe um arquivo de backup, porém o restore de teste não foi aprovado. Não trate esse backup como seguro.
+
+NÃO RECUPERÁVEL COM FERRAMENTAS PADRÃO
+- gfix/gbak não conseguiram produzir um banco validado. Preserve o original e todos os arquivos de recuperação para análise especializada.
+
+6. ARQUIVOS GERADOS NO MODO AVANÇADO
+Dentro da pasta RECOVERY_... podem ser criados:
+- *_WORK.RED: cópia de trabalho usada para reparos.
+- *_RECOVERY.BAK: backup de recuperação.
+- *_RECOVERY_SEM_<TABELA>.BAK ou backup-base equivalente: cópia intermediária sem a relação problemática, preservada para auditoria quando usada.
+- *_SALVAGE_<TABELA>.FDB: banco temporário limpo onde os registros legíveis são reinseridos.
+- *_COM_ITENS.BAK: novo backup gerado depois do resgate de registros, quando aplicável.
+- *_RESTORE_FALHO_XX.RED: restore originalmente falho preservado quando o erro envolve chave duplicada.
+- *_CONFLITO_ORIGINAL_XX.RED: restauração completa com índices inativos, preservada antes do saneamento das duplicidades.
+- *_CONFLITO_SANEADO_XX.RED: banco de trabalho após remover somente ocorrências extras autorizadas.
+- *_SEM_DUPLICIDADES_XX.BAK: backup regenerado após o saneamento de chaves duplicadas.
+- CONFLITOS_DUPLICIDADE.txt: chave, quantidade de ocorrências, campos diferentes/inconclusivos e exportação para inspeção.
+- *_RECOVERY_METADATA.BAK: backup somente de metadados quando o backup completo falha.
+- LOG_TECNICO_RECUPERACAO.txt: saída técnica completa das ferramentas.
+- RELATORIO_RECUPERACAO.txt: resumo do diagnóstico, ações, avisos, falhas e resultado final.
+
+7. COMO INTERPRETAR ALGUNS ERROS
+"wrong page type" / "database page errors"
+- Indica corrupção estrutural de página e deve ser tratada no modo avançado.
+
+"index page errors"
+- Pode indicar corrupção de índice. Índices normalmente são reconstruídos no backup/restore, mas erros combinados com páginas/BLOBs exigem mais cautela.
+
+"BLOB errors"
+- Pode haver perda localizada em campos BLOB.
+
+"transaction ... in limbo"
+- Há transação distribuída pendente. O Toolbox diagnostica, mas não decide commit/rollback automaticamente.
+
+Falha do restore por PRIMARY/UNIQUE duplicada
+- O Toolbox extrai automaticamente tabela, constraint e chave problemática do gbak.
+- Em vez de insistir em -one_at_a_time, refaz o restore com índices inativos para manter todos os registros disponíveis.
+- Se as ocorrências forem diferentes, nenhuma é descartada silenciosamente: o banco original do conflito e CONFLITOS_DUPLICIDADE.txt ficam preservados e a continuação exige confirmação.
+
+Falha do gbak em uma tabela
+- O modo avançado registra a saída verbose internamente e tenta identificar a relação afetada.
+- Se o erro for compatível com índice corrompido, tenta primeiro desativar índices não vinculados a constraints somente na cópia de trabalho e repete o backup sem excluir dados.
+- Se isso não resolver, em Firebird 3.0+ pode criar um backup-base com -skip_data e tentar recuperar os registros da tabela para um banco limpo.
+
+8. LOG RESUMIDO E DETALHADO
+Detalhado: não
+- Mostra etapas, avisos, erros e resultado final.
+
+Detalhado: sim
+- Mostra comandos e saída técnica ampliada para diagnóstico.
+- No modo avançado, o log técnico completo também é preservado em arquivo mesmo quando a tela está resumida.
+
+9. BOAS PRÁTICAS DE SEGURANÇA
+- Nunca faça recuperação pesada diretamente sobre a única cópia do banco.
+- Mantenha o banco fora de uso durante validação/reparo sempre que possível.
+- Não apague a pasta RECOVERY_... antes de validar o sistema e os dados recuperados.
+- Após uma recuperação parcial, confira especialmente a relação indicada no relatório, as chaves não recuperadas e suas dependências.
+- Um backup só deve ser considerado confiável depois de um restore de teste aprovado.
+
+10. ONDE ENCONTRAR MAIS DETALHES
+Use o botão Copiar ajuda para copiar este guia. Os arquivos LEIA-ME.md e README_FirebirdToolbox.md incluídos no pacote também documentam o funcionamento do utilitário.
+
+Firebird Toolbox v` + appVersion + `
+` + appCredit)
+}
+
+func createHelpControl(exStyle uint32, className, text string, style uint32, x, y, w, h int32, id int) syscall.Handle {
+	hwnd, _, _ := procCreateWindowExW.Call(
+		uintptr(exStyle),
+		uintptr(unsafe.Pointer(u16(className))),
+		uintptr(unsafe.Pointer(u16(text))),
+		uintptr(style),
+		uintptr(x), uintptr(y), uintptr(w), uintptr(h),
+		uintptr(helpHwnd), uintptr(id), 0, 0,
+	)
+	handle := syscall.Handle(hwnd)
+	if guiFont != 0 {
+		procSendMessageW.Call(uintptr(handle), WM_SETFONT, uintptr(guiFont), 1)
+	}
+	return handle
+}
+
+func helpWndProc(hwnd syscall.Handle, uMsg uint32, wParam, lParam uintptr) uintptr {
+	switch uMsg {
+	case WM_COMMAND:
+		id := int(uint16(wParam & 0xffff))
+		code := int(uint16((wParam >> 16) & 0xffff))
+		if code == BN_CLICKED {
+			switch id {
+			case idHelpCopy:
+				copyTextToClipboard(helpText(), "Ajuda copiada para a área de transferência.")
+				return 0
+			case idHelpClose:
+				procDestroyWindow.Call(uintptr(hwnd))
+				return 0
+			}
+		}
+	case WM_CLOSE:
+		procDestroyWindow.Call(uintptr(hwnd))
+		return 0
+	case WM_DESTROY:
+		helpHwnd = 0
+		helpContentHwnd = 0
+		return 0
+	}
+	r, _, _ := procDefWindowProcW.Call(uintptr(hwnd), uintptr(uMsg), wParam, lParam)
+	return r
+}
+
+func openHelp() {
+	if helpHwnd != 0 {
+		procShowWindow.Call(uintptr(helpHwnd), SW_SHOW)
+		procSetForegroundWindow.Call(uintptr(helpHwnd))
+		return
+	}
+
+	hinst, _, _ := procGetModuleHandleW.Call(0)
+	className := u16("FirebirdToolboxHelpWindow")
+	hwnd, _, err := procCreateWindowExW.Call(
+		0,
+		uintptr(unsafe.Pointer(className)),
+		uintptr(unsafe.Pointer(u16("Ajuda - Firebird Toolbox"))),
+		WS_CAPTION|WS_SYSMENU|WS_VISIBLE,
+		190, 75, 790, 760,
+		uintptr(mainHwnd), 0, hinst, 0,
+	)
+	if hwnd == 0 {
+		messageBox("Firebird Toolbox", "Não foi possível abrir a ajuda integrada.\n\nDetalhes: "+fmt.Sprint(err), MB_OK|MB_ICONERROR)
+		return
+	}
+	helpHwnd = syscall.Handle(hwnd)
+
+	if icon := cachedUIIcon("help", 32); icon != 0 {
+		procSendMessageW.Call(hwnd, WM_SETICON, ICON_BIG, uintptr(icon))
+	}
+	if icon := cachedUIIcon("help", 16); icon != 0 {
+		procSendMessageW.Call(hwnd, WM_SETICON, ICON_SMALL, uintptr(icon))
+	}
+
+	helpIcon := createHelpControl(0, "STATIC", "", WS_CHILD|WS_VISIBLE|SS_ICON, 20, 16, 28, 28, 0)
+	if icon := cachedUIIcon("help", 24); icon != 0 {
+		procSendMessageW.Call(uintptr(helpIcon), STM_SETICON, uintptr(icon), 0)
+	}
+	title := createHelpControl(0, "STATIC", "Ajuda do Firebird Toolbox", WS_CHILD|WS_VISIBLE, 56, 14, 500, 30, 0)
+	if titleFont != 0 {
+		procSendMessageW.Call(uintptr(title), WM_SETFONT, uintptr(titleFont), 1)
+	}
+	createHelpControl(0, "STATIC", "Guia rápido, recuperação segura e interpretação dos resultados", WS_CHILD|WS_VISIBLE, 22, 47, 720, 22, 0)
+
+	helpDisplayText := strings.ReplaceAll(helpText(), "\n", "\r\n")
+	helpContentHwnd = createHelpControl(WS_EX_CLIENTEDGE, "EDIT", helpDisplayText, WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY, 20, 78, 742, 610, 0)
+	procSendMessageW.Call(uintptr(helpContentHwnd), EM_SETSEL, 0, 0)
+	procSendMessageW.Call(uintptr(helpContentHwnd), EM_SCROLLCARET, 0, 0)
+
+	createHelpControl(0, "BUTTON", "Copiar ajuda", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 552, 700, 100, 30, idHelpCopy)
+	createHelpControl(0, "BUTTON", "Fechar", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 662, 700, 100, 30, idHelpClose)
+	procShowWindow.Call(hwnd, SW_SHOW)
+	procUpdateWindow.Call(hwnd)
+}
+
+func openDestination() {
+	d := strings.TrimSpace(getText(idDest))
+	if d == "" {
+		d = strings.TrimSpace(getText(idBackupDir))
+	}
+	if d == "" {
+		return
+	}
+	dir := d
+	if !dirExists(dir) {
+		dir = filepath.Dir(d)
+	}
+	if !dirExists(dir) {
+		messageBox("Firebird Toolbox", "A pasta de destino ainda não existe.", MB_OK|MB_ICONWARNING)
+		return
+	}
+	cmd := exec.Command("explorer.exe", dir)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	_ = cmd.Start()
+}
+
+func ensureAdmin() {
+	r, _, _ := procIsUserAnAdmin.Call()
+	if r != 0 {
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	cwd, _ := os.Getwd()
+	ret, _, _ := procShellExecuteW.Call(
+		0,
+		uintptr(unsafe.Pointer(u16("runas"))),
+		uintptr(unsafe.Pointer(u16(exe))),
+		0,
+		uintptr(unsafe.Pointer(u16(cwd))),
+		SW_SHOWNORMAL,
+	)
+	if ret > 32 {
+		os.Exit(0)
+	}
+}
+
+func wndProc(hwnd syscall.Handle, uMsg uint32, wParam, lParam uintptr) uintptr {
+	switch uMsg {
+	case WM_CREATE:
+		return 0
+	case WM_DRAWITEM:
+		if lParam != 0 {
+			var dis drawItemStruct
+			procMoveMemory.Call(uintptr(unsafe.Pointer(&dis)), lParam, unsafe.Sizeof(dis))
+			if drawOwnerButton(&dis) {
+				return 1
+			}
+		}
+	case WM_CTLCOLORSTATIC:
+		if syscall.Handle(lParam) == controls[idLog] && logBrush != 0 {
+			procSetTextColor.Call(wParam, rgb(226, 232, 240))
+			procSetBkColor.Call(wParam, rgb(28, 31, 36))
+			return uintptr(logBrush)
+		}
+	case WM_COMMAND:
+		id := int(uint16(wParam & 0xffff))
+		code := int(uint16((wParam >> 16) & 0xffff))
+		if code == CBN_SELCHANGE {
+			switch id {
+			case idRoutine:
+				routineChanged()
+			case idSourceVersion:
+				sourceVersionChanged()
+			case idRestoreVersion:
+				restoreVersionChanged()
+			}
+			return 0
+		}
+		if code == BN_CLICKED {
+			switch id {
+			case idSourceBtn:
+				browseSource()
+			case idDestBtn:
+				browseDestination()
+			case idBackupDirBtn:
+				browseBackupDir()
+			case idFbSourceBtn:
+				browseFB(false)
+			case idFbTargetBtn:
+				browseFB(true)
+			case idPasswordToggle:
+				togglePassword()
+			case idExecute:
+				executeWorkflow()
+			case idStop:
+				stopWorkflow()
+			case idOpenDest:
+				openDestination()
+			case idCopyPath:
+				copyDestinationPath()
+			case idHelp:
+				openHelp()
+			case idClearLog:
+				clearLog()
+			case idCopyLog:
+				copyLogToClipboard()
+			case idDetailedLog:
+				toggleDetailedLog()
+			}
+		}
+		return 0
+	case WM_CLOSE:
+		if isRunning() {
+			if messageBox("Firebird Toolbox", "Existe uma rotina em execução.\n\nDeseja interromper e fechar o programa?", MB_YESNO|MB_ICONWARNING) != IDYES {
+				return 0
+			}
+			runMu.Lock()
+			if currentCancel != nil {
+				currentCancel()
+			}
+			runMu.Unlock()
+		}
+		procDestroyWindow.Call(uintptr(hwnd))
+		return 0
+	case WM_DESTROY:
+		procPostQuitMessage.Call(0)
+		return 0
+	}
+	r, _, _ := procDefWindowProcW.Call(uintptr(hwnd), uintptr(uMsg), wParam, lParam)
+	return r
+}
+
+func addCombo(id int, items []string, x, y, w int32, selected int) syscall.Handle {
+	combo := createControl(WS_EX_CLIENTEDGE, "COMBOBOX", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|CBS_DROPDOWNLIST|CBS_HASSTRINGS, x, y, w, 220, id)
+	for _, item := range items {
+		procSendMessageW.Call(uintptr(combo), CB_ADDSTRING, 0, uintptr(unsafe.Pointer(u16(item))))
+	}
+	procSendMessageW.Call(uintptr(combo), CB_SETCURSEL, uintptr(selected), 0)
+	return combo
+}
+
+func buildArchLabel() string {
+	if runtime.GOARCH == "386" {
+		return "Windows x86"
+	}
+	return "Windows x64"
+}
+
+func buildUI() {
+	addIcon("flame", 20, 14, 28)
+	createControl(0, "STATIC", "Firebird Toolbox", WS_CHILD|WS_VISIBLE, 56, 10, 330, 30, idHeaderTitle)
+	setControlFont(idHeaderTitle, titleFont)
+	createControl(0, "STATIC", "Firebird 1.0 a 5.0 • manutenção, correção e restauração", WS_CHILD|WS_VISIBLE, 56, 39, 430, 20, 3002)
+	createControl(0, "STATIC", "v"+appVersion+"  •  "+buildArchLabel(), WS_CHILD|WS_VISIBLE, 744, 22, 160, 20, 3004)
+
+	createControl(0, "BUTTON", "", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 16, 66, 888, 106, 0)
+	addSectionHeader(idSectionRoutine, "gear", "1. Rotina e versão", 30, 72)
+	createControl(0, "STATIC", "Rotina:", WS_CHILD|WS_VISIBLE, 30, 106, 62, 20, 3003)
+	addCombo(idRoutine, routineNames(routines), 96, 102, 270, 0)
+	createControl(0, "STATIC", "Versão da rotina:", WS_CHILD|WS_VISIBLE, 386, 106, 120, 20, lblSourceVer)
+	addCombo(idSourceVersion, versions, 510, 102, 95, versionIndex("5.0"))
+	addIcon("restore", 622, 104, 16)
+	createControl(0, "STATIC", "Restaurar para:", WS_CHILD|WS_VISIBLE, 646, 106, 90, 20, lblRestoreVer)
+	addCombo(idRestoreVersion, restoreVersions, 738, 102, 146, restoreVersionIndex("5.0"))
+	createControl(0, "STATIC", routines[0].Description, WS_CHILD|WS_VISIBLE, 30, 140, 850, 20, idDescription)
+
+	createControl(0, "BUTTON", "", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 16, 182, 888, 140, 0)
+	addSectionHeader(idSectionFiles, "folder", "2. Origem e destino", 30, 188)
+	createControl(0, "STATIC", "Banco de origem:", WS_CHILD|WS_VISIBLE, 30, 220, uiFilesLabelWidth, 20, lblSource)
+	createControl(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, uiFilesFieldX, 216, 778-uiFilesFieldX, 26, idSource)
+	createIconButton(idSourceBtn, "Procurar", 790, 215, 94, 28)
+
+	createControl(0, "STATIC", "Arquivo de destino:", WS_CHILD|WS_VISIBLE, 30, 255, uiFilesLabelWidth, 20, lblDest)
+	createControl(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, uiFilesFieldX, 251, 778-uiFilesFieldX, 26, idDest)
+	createIconButton(idDestBtn, "Procurar", 790, 250, 94, 28)
+
+	createControl(0, "STATIC", "Pasta do backup:", WS_CHILD|WS_VISIBLE, 30, 290, uiFilesLabelWidth, 20, lblBackup)
+	createControl(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, uiFilesFieldX, 286, 778-uiFilesFieldX, 26, idBackupDir)
+	createIconButton(idBackupDirBtn, "Procurar", 790, 285, 94, 28)
+
+	createControl(0, "BUTTON", "", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 16, 332, 888, 168, 0)
+	addSectionHeader(idSectionFirebird, "database", "3. Configurações do Firebird", 30, 338)
+	createControl(0, "STATIC", "Firebird da rotina:", WS_CHILD|WS_VISIBLE, 30, 372, uiFirebirdLabelWidth, 20, lblFbSource)
+	createControl(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, uiFirebirdFieldX, 368, 682-uiFirebirdFieldX, 26, idFbSource)
+	createIconButton(idFbSourceBtn, "Escolher", 694, 367, 86, 28)
+	createControl(0, "STATIC", "Porta:", WS_CHILD|WS_VISIBLE, 792, 372, 42, 20, lblSourcePort)
+	createControl(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, 836, 368, 48, 26, idSourcePort)
+
+	createControl(0, "STATIC", "Firebird da restauração:", WS_CHILD|WS_VISIBLE, 30, 407, uiFirebirdLabelWidth, 20, lblFbTarget)
+	createControl(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, uiFirebirdFieldX, 403, 682-uiFirebirdFieldX, 26, idFbTarget)
+	createIconButton(idFbTargetBtn, "Escolher", 694, 402, 86, 28)
+	createControl(0, "STATIC", "Porta:", WS_CHILD|WS_VISIBLE, 792, 407, 42, 20, lblTargetPort)
+	createControl(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, 836, 403, 48, 26, idTargetPort)
+
+	createControl(0, "STATIC", "Serviço:", WS_CHILD|WS_VISIBLE, 30, 447, 60, 20, lblService)
+	createControl(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, 92, 443, 202, 26, idService)
+	createControl(0, "STATIC", "Usuário:", WS_CHILD|WS_VISIBLE, 312, 447, 55, 20, 3010)
+	createControl(WS_EX_CLIENTEDGE, "EDIT", "SYSDBA", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, 370, 443, 144, 26, idUser)
+	createControl(0, "STATIC", "Senha:", WS_CHILD|WS_VISIBLE, 530, 447, 50, 20, 3011)
+	createControl(WS_EX_CLIENTEDGE, "EDIT", "masterkey", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL|ES_PASSWORD, 582, 443, 166, 26, idPassword)
+	createIconButton(idPasswordToggle, "Mostrar senha", 760, 442, 124, 28)
+
+	createControl(0, "BUTTON", "", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 16, 510, 888, 178, 0)
+	addSectionHeader(idSectionExecute, "play", "4. Executar", 30, 516)
+	createIconButton(idExecute, "Executar", 30, 544, 118, 32)
+	createIconButton(idStop, "Parar", 158, 544, 88, 32)
+	createIconButton(idOpenDest, "Abrir pasta", 256, 544, 120, 32)
+	createIconButton(idCopyPath, "Copiar caminho", 386, 544, 132, 32)
+	createIconButton(idHelp, "Ajuda", 528, 544, 88, 32)
+
+	createControl(0, "STATIC", "Pular tabelas (avançado):", WS_CHILD|WS_VISIBLE, 30, 586, 158, 20, lblSkipData)
+	createControl(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, uiSkipEditX, 582, uiSkipEditWidth, 26, idSkipData)
+	createControl(0, "STATIC", "Regex opcional do gbak -skip_data (FB 3.0+)", WS_CHILD|WS_VISIBLE, uiSkipHintX, 586, uiSkipHintWidth, 20, 3021)
+
+	// Andamento e resultado ocupam linhas próprias para manter textos longos
+	// integralmente legíveis sem disputar espaço com a barra de progresso.
+	createControl(0, "STATIC", "Etapa atual:", WS_CHILD|WS_VISIBLE, 30, 616, 70, 20, 3022)
+	createControl(0, "STATIC", "Preparando...", WS_CHILD|WS_VISIBLE, 102, 616, uiProgressTextWidth, 20, idProgressText)
+
+	createControl(0, "STATIC", "Progresso:", WS_CHILD|WS_VISIBLE, 30, 642, 70, 20, 3020)
+	progress := createControl(0, "msctls_progress32", "", WS_CHILD|WS_VISIBLE|PBS_SMOOTH, 102, 641, uiProgressBarWidth, 18, idProgress)
+	procSendMessageW.Call(uintptr(progress), PBM_SETRANGE32, 0, 100)
+
+	createControl(0, "STATIC", "Resultado:", WS_CHILD|WS_VISIBLE, 30, 666, 70, 20, 3023)
+	createControl(0, "STATIC", "Aguardando execução", WS_CHILD|WS_VISIBLE, 102, 666, 780, 20, idResult)
+
+	createControl(0, "BUTTON", "", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 16, 696, 888, 170, 0)
+	addSectionHeader(idSectionLog, "terminal", "Log de execução", 30, 702)
+	createIconButton(idDetailedLog, "Detalhado: não", 536, 702, 116, 28)
+	createIconButton(idClearLog, "Limpar", 662, 702, 102, 28)
+	createIconButton(idCopyLog, "Copiar", 774, 702, 110, 28)
+	createControl(0, "EDIT", "", WS_CHILD|WS_VISIBLE|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY|WS_VSCROLL|WS_BORDER, 28, 736, 864, uiLogEditHeight, idLog)
+	setControlFont(idLog, monoFont)
+
+	createControl(0, "STATIC", "Status:", WS_CHILD|WS_VISIBLE, 22, 875, 45, 20, 3012)
+	createControl(0, "STATIC", "Pronto. Selecione a rotina, os arquivos e clique em Executar.", WS_CHILD|WS_VISIBLE, 70, 875, 500, 20, idStatus)
+	createControl(0, "STATIC", appCredit, WS_CHILD|WS_VISIBLE, 590, 875, 300, 20, 3013)
+
+	setText(idFbSource, detectFirebird("5.0"))
+	setText(idFbTarget, detectFirebird("5.0"))
+	setText(idService, defaults["5.0"].Service)
+	setText(idSourcePort, detectFirebirdPort(getText(idFbSource), "5.0"))
+	setText(idTargetPort, detectFirebirdPort(getText(idFbTarget), "5.0"))
+	enableControl(idStop, false)
+	applyPasswordVisibility(false)
+	setProgressState(PBST_NORMAL)
+	setProgress(0, "Aguardando...")
+	routineChanged()
+}
+
+func createFont(height int32, weight int32, face string) syscall.Handle {
+	h, _, _ := procCreateFontW.Call(
+		uintptr(height), 0, 0, 0, uintptr(weight), 0, 0, 0,
+		1, 0, 0, 5, 0,
+		uintptr(unsafe.Pointer(u16(face))),
+	)
+	return syscall.Handle(h)
+}
+
+func showStartupFailure(v any) {
+	message := fmt.Sprintf("O Firebird Toolbox encontrou um erro ao iniciar e nao pode continuar.\n\nDetalhes: %v\n\nEsta mensagem evita que o programa feche silenciosamente.", v)
+	messageBox("Firebird Toolbox - erro de inicializacao", message, MB_OK|MB_ICONERROR)
+}
+
+func main() {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			showStartupFailure(recovered)
+		}
+	}()
+	runtime.LockOSThread()
+	procCoInitializeEx.Call(0, 2)
+	procInitCommonControls.Call()
+	defer procCoUninitialize.Call()
+	ensureAdmin()
+
+	hinst, _, _ := procGetModuleHandleW.Call(0)
+	cursor, _, _ := procLoadCursorW.Call(0, IDC_ARROW)
+	guiFont = createFont(-15, FW_NORMAL, "Segoe UI")
+	titleFont = createFont(-24, FW_SEMIBOLD, "Segoe UI")
+	sectionFont = createFont(-15, FW_SEMIBOLD, "Segoe UI")
+	monoFont = createFont(-15, FW_NORMAL, "Consolas")
+	brush, _, _ := procCreateSolidBrush.Call(rgb(28, 31, 36))
+	logBrush = syscall.Handle(brush)
+
+	className := u16("FirebirdToolboxWindow")
+	wc := wndClassEx{
+		cbSize:        uint32(unsafe.Sizeof(wndClassEx{})),
+		lpfnWndProc:   syscall.NewCallback(wndProc),
+		hInstance:     syscall.Handle(hinst),
+		hCursor:       syscall.Handle(cursor),
+		hbrBackground: syscall.Handle(COLOR_WINDOW + 1),
+		lpszClassName: className,
+	}
+	atom, _, err := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
+	if atom == 0 {
+		showStartupFailure(fmt.Sprintf("nao foi possivel registrar a janela: %v", err))
+		return
+	}
+
+	helpClassName := u16("FirebirdToolboxHelpWindow")
+	helpClass := wndClassEx{
+		cbSize:        uint32(unsafe.Sizeof(wndClassEx{})),
+		lpfnWndProc:   syscall.NewCallback(helpWndProc),
+		hInstance:     syscall.Handle(hinst),
+		hCursor:       syscall.Handle(cursor),
+		hbrBackground: syscall.Handle(COLOR_WINDOW + 1),
+		lpszClassName: helpClassName,
+	}
+	if helpAtom, _, helpErr := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&helpClass))); helpAtom == 0 {
+		showStartupFailure(fmt.Sprintf("nao foi possivel registrar a janela de ajuda: %v", helpErr))
+		return
+	}
+
+	hwnd, _, _ := procCreateWindowExW.Call(
+		0,
+		uintptr(unsafe.Pointer(className)),
+		uintptr(unsafe.Pointer(u16("Firebird Toolbox"))),
+		WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_VISIBLE,
+		120, 40, 930, 942,
+		0, 0, hinst, 0,
+	)
+	if hwnd == 0 {
+		return
+	}
+	mainHwnd = syscall.Handle(hwnd)
+	prepareUIAssets()
+	setAppIcons()
+	buildUI()
+	procShowWindow.Call(hwnd, SW_SHOW)
+	procUpdateWindow.Call(hwnd)
+
+	var m msg
+	for {
+		r, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
+		if int32(r) <= 0 {
+			break
+		}
+		procTranslateMessage.Call(uintptr(unsafe.Pointer(&m)))
+		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
+	}
+
+	cleanupUIAssets()
+
+	if guiFont != 0 {
+		procDeleteObject.Call(uintptr(guiFont))
+	}
+	if titleFont != 0 {
+		procDeleteObject.Call(uintptr(titleFont))
+	}
+	if sectionFont != 0 {
+		procDeleteObject.Call(uintptr(sectionFont))
+	}
+	if monoFont != 0 {
+		procDeleteObject.Call(uintptr(monoFont))
+	}
+	if logBrush != 0 {
+		procDeleteObject.Call(uintptr(logBrush))
+	}
+}
