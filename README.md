@@ -2,9 +2,9 @@
 
 Utilitário portátil para Windows destinado à **manutenção, correção, recuperação e restauração de bancos Firebird 1.0 a 5.0**.
 
-**Versão atual:** 1.2.10  
+**Versão atual:** 1.2.11
 
-A v1.2.10 mantém o hardening de distribuição Windows da v1.2.9 e corrige o CI/Release: a Ajuda integrada documenta explicitamente `gbak -inactive` no saneamento de chaves duplicadas, e os workflows usam Actions atuais baseados em Node 24.
+A v1.2.11 corrige o empacotamento automático no GitHub Actions: o `go build` passa a receber `-ldflags` de forma compatível com PowerShell, evitando a falha que interrompia a Release antes da geração dos EXEs. O hardening de distribuição, VersionInfo, manifesto e assinatura Authenticode opcional continuam preservados.
 
 **Projeto feito por Marcos De Mori Laiola**
 
@@ -31,7 +31,7 @@ A v1.2.10 mantém o hardening de distribuição Windows da v1.2.9 e corrige o CI
 
 Os executáveis compilados devem ser disponibilizados na seção **Releases** deste repositório.
 
-Ao criar uma tag no formato `v1.2.10`, por exemplo, o workflow de release compila automaticamente:
+Ao criar uma tag no formato `v1.2.11`, por exemplo, o workflow de release compila automaticamente:
 
 - Windows x64;
 - Windows x86 / 32-bit;
@@ -78,10 +78,10 @@ Para compilar somente x64:
 ```powershell
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"
-.\tools\prepare-resources.ps1 -Version "1.2.10"
+.\tools\prepare-resources.ps1 -Version "1.2.11"
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"
-go build -trimpath -buildvcs=false -ldflags="-H=windowsgui -X main.appVersion=1.2.10" -o FirebirdToolbox.exe .
+go build -trimpath -buildvcs=false -ldflags="-H=windowsgui -X main.appVersion=1.2.11" -o FirebirdToolbox.exe .
 ```
 
 ## Publicar no GitHub

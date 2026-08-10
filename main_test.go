@@ -265,7 +265,7 @@ func TestMergeRecoveryStatsKeepsWorstCounts(t *testing.T) {
 }
 
 func TestProjectCreditAndVersion(t *testing.T) {
-	if appVersion != "1.2.10" {
+	if appVersion != "1.2.11" {
 		t.Fatalf("unexpected app version: %s", appVersion)
 	}
 	if appCredit != "Projeto feito por Marcos De Mori Laiola" {
@@ -598,13 +598,37 @@ func TestWindowsDistributionMetadataConfig(t *testing.T) {
 	for _, want := range []string{
 		`"CompanyName": "Marcos De Mori Laiola"`,
 		`"ProductName": "Firebird Toolbox"`,
-		`"FileVersion": "1.2.10.0"`,
-		`"ProductVersion": "1.2.10"`,
+		`"FileVersion": "1.2.11.0"`,
+		`"ProductVersion": "1.2.11"`,
 		`"execution-level": "as invoker"`,
 		`"use-common-controls-v6": true`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("winres metadata missing %q", want)
+		}
+	}
+}
+
+func TestWindowsBuildScriptsPassLdflagsAsSeparateArgument(t *testing.T) {
+	paths := []string{
+		".github/workflows/release.yml",
+		".github/workflows/ci.yml",
+		"tools/build.ps1",
+	}
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		text := string(data)
+		if strings.Contains(text, "-ldflags=$ld") {
+			t.Fatalf("%s still uses PowerShell-unsafe -ldflags=$ld syntax", path)
+		}
+		if !strings.Contains(text, "'-ldflags'") && !strings.Contains(text, `"-ldflags"`) {
+			t.Fatalf("%s must pass -ldflags as its own argument", path)
+		}
+		if !strings.Contains(text, "$ld") {
+			t.Fatalf("%s must pass the ldflags value separately", path)
 		}
 	}
 }

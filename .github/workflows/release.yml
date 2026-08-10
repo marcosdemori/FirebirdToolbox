@@ -28,6 +28,15 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}".TrimStart('v')
+          $source = Get-Content ./main.go -Raw
+          $versionMatch = [regex]::Match($source, 'var appVersion = "([^"]+)"')
+          if (-not $versionMatch.Success) {
+            throw "Nao foi possivel localizar appVersion em main.go."
+          }
+          $sourceVersion = $versionMatch.Groups[1].Value
+          if ($sourceVersion -ne $version) {
+            throw "Tag v$version diverge de appVersion=$sourceVersion. Atualize a versao ou crie a tag correta."
+          }
           "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Validate
@@ -57,10 +66,14 @@ jobs:
 
           $env:GOOS = 'windows'
           $env:GOARCH = 'amd64'
-          go build -trimpath -buildvcs=false -ldflags=$ld -o "dist/FirebirdToolbox_$tag.exe" .
+          $goArgs = @('build', '-trimpath', '-buildvcs=false', '-ldflags', $ld, '-o', "dist/FirebirdToolbox_$tag.exe", '.')
+          & go @goArgs
+          if ($LASTEXITCODE -ne 0) { throw "go build x64 falhou com codigo $LASTEXITCODE." }
 
           $env:GOARCH = '386'
-          go build -trimpath -buildvcs=false -ldflags=$ld -o "dist/FirebirdToolbox_${tag}_x86.exe" .
+          $goArgs = @('build', '-trimpath', '-buildvcs=false', '-ldflags', $ld, '-o', "dist/FirebirdToolbox_${tag}_x86.exe", '.')
+          & go @goArgs
+          if ($LASTEXITCODE -ne 0) { throw "go build x86 falhou com codigo $LASTEXITCODE." }
 
           ./tools/verify-windows-build.ps1 -Path "dist/FirebirdToolbox_$tag.exe" -Version $version
           ./tools/verify-windows-build.ps1 -Path "dist/FirebirdToolbox_${tag}_x86.exe" -Version $version

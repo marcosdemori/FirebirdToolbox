@@ -28,11 +28,11 @@ import (
 	"unsafe"
 )
 
-var appVersion = "1.2.10"
+var appVersion = "1.2.11"
 var appCredit = "Projeto feito por Marcos De Mori Laiola"
 
 // Os BATs originais continuam incorporados como referencia/documentacao da logica
-// que originou o utilitario. A v1.2.10 executa gfix/gbak diretamente para manter
+// que originou o utilitario. A v1.2.11 executa gfix/gbak diretamente para manter
 // todo o log dentro da interface e permitir combinar versoes de origem/destino.
 //
 //go:embed scripts/*.bat LEIA-ME.md assets/*.ico

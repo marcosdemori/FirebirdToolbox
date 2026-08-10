@@ -37,7 +37,7 @@ echo.
 echo IMPORTANTE: nao continue se aparecer banco, backup, RECOVERY,
 echo senha privada, certificado ou qualquer dado de cliente.
 echo.
-set /p CONFIRMA=Continuar com o commit? [S/N]: 
+set /p CONFIRMA=Continuar com o commit? [S/N]:
 if /I not "%CONFIRMA%"=="S" (
     echo Operacao cancelada.
     pause
@@ -48,11 +48,11 @@ git diff --cached --quiet
 if not errorlevel 1 (
     echo Nao ha alteracoes novas para commit.
 ) else (
-    git commit -m "chore(repo): preparar Firebird Toolbox v1.2.10 para GitHub" || goto :erro
+    git commit -m "fix(release): corrigir build Windows no GitHub Actions v1.2.11" || goto :erro
 )
 
 echo.
-set /p REPOURL=Cole a URL HTTPS do repositorio GitHub: 
+set /p REPOURL=Cole a URL HTTPS do repositorio GitHub:
 if "%REPOURL%"=="" (
     echo URL nao informada. O commit local foi mantido.
     pause
@@ -71,13 +71,13 @@ echo Enviando branch main...
 git push -u origin main || goto :erro
 
 echo.
-set /p TAG=Criar e enviar a tag v1.2.10 para gerar a Release automatica? [S/N]: 
+set /p TAG=Criar e enviar a tag v1.2.11 para gerar a Release automatica? [S/N]:
 if /I "%TAG%"=="S" (
-    git rev-parse v1.2.10 >nul 2>nul
+    git rev-parse v1.2.11 >nul 2>nul
     if errorlevel 1 (
-        git tag -a v1.2.10 -m "Firebird Toolbox v1.2.10" || goto :erro
+        git tag -a v1.2.11 -m "Firebird Toolbox v1.2.11" || goto :erro
     )
-    git push origin v1.2.10 || goto :erro
+    git push origin v1.2.11 || goto :erro
     echo.
     echo Tag enviada. O GitHub Actions deve iniciar o workflow Release.
 )

@@ -1,11 +1,11 @@
-# Firebird Toolbox v1.2.10
+# Firebird Toolbox v1.2.11
 
 > Para a visão geral do repositório, build e publicação no GitHub, consulte [README.md](README.md).
 
 
 Utilitário portátil para Windows (x64 e x86) para manutenção, recuperação e restauração de bancos Firebird **1.0, 1.5, 2.0, 2.1, 2.5, 3.0, 4.0 e 5.0**.
 
-A v1.2.10 mantém somente três rotinas na interface:
+A v1.2.11 mantém somente três rotinas na interface:
 
 1. `Corrigir banco`
 2. `Corrigir banco (avançado)`
@@ -272,12 +272,12 @@ A porta pode ser detectada em `RemoteServicePort` do `firebird.conf`. O serviço
 $env:GOOS = 'windows'
 $env:GOARCH = 'amd64'
 go vet ./...
-.\tools\prepare-resources.ps1 -Version '1.2.10'
-go build -trimpath -buildvcs=false -ldflags='-H=windowsgui -X main.appVersion=1.2.10' -o FirebirdToolbox_v1.2.10.exe .
+.\tools\prepare-resources.ps1 -Version '1.2.11'
+go build -trimpath -buildvcs=false -ldflags='-H=windowsgui -X main.appVersion=1.2.11' -o FirebirdToolbox_v1.2.11.exe .
 
 $env:GOARCH = '386'
 go vet ./...
-go build -trimpath -buildvcs=false -ldflags='-H=windowsgui -X main.appVersion=1.2.10' -o FirebirdToolbox_v1.2.10_x86.exe .
+go build -trimpath -buildvcs=false -ldflags='-H=windowsgui -X main.appVersion=1.2.11' -o FirebirdToolbox_v1.2.11_x86.exe .
 ```
 
 ## Assinatura

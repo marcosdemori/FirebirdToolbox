@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.2.10",
+    [string]$Version = "1.2.11",
     [string]$SigningPfx = "",
     [string]$SigningPassword = ""
 )
@@ -36,9 +36,16 @@ try {
     Write-Host "[5/7] Compilando aplicativo Windows x64/x86 com metadados..."
     $ld = "-H=windowsgui -X main.appVersion=$Version"
     $env:GOARCH = "amd64"
-    go build -trimpath -buildvcs=false -ldflags=$ld -o (Join-Path $Dist "FirebirdToolbox_v$Version.exe") .
+    $x64Out = Join-Path $Dist "FirebirdToolbox_v$Version.exe"
+    $goArgs = @("build", "-trimpath", "-buildvcs=false", "-ldflags", $ld, "-o", $x64Out, ".")
+    & go @goArgs
+    if ($LASTEXITCODE -ne 0) { throw "go build x64 falhou com codigo $LASTEXITCODE." }
+
     $env:GOARCH = "386"
-    go build -trimpath -buildvcs=false -ldflags=$ld -o (Join-Path $Dist "FirebirdToolbox_v${Version}_x86.exe") .
+    $x86Out = Join-Path $Dist "FirebirdToolbox_v${Version}_x86.exe"
+    $goArgs = @("build", "-trimpath", "-buildvcs=false", "-ldflags", $ld, "-o", $x86Out, ".")
+    & go @goArgs
+    if ($LASTEXITCODE -ne 0) { throw "go build x86 falhou com codigo $LASTEXITCODE." }
 
     $apps = @(
         (Join-Path $Dist "FirebirdToolbox_v$Version.exe"),

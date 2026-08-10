@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$Path,
-    [string]$Version = "1.2.10",
+    [string]$Version = "1.2.11",
     [switch]$RequireSignature
 )
 

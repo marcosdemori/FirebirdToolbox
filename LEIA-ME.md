@@ -1,6 +1,6 @@
-# Firebird Toolbox v1.2.10 — Ajuda rápida
+# Firebird Toolbox v1.2.11 — Ajuda rápida
 
-Na v1.2.10, os executáveis de distribuição passam a incluir metadados nativos do Windows (produto, desenvolvedor, versão, descrição, ícone e manifesto). O pipeline do GitHub também pode aplicar assinatura Authenticode quando um certificado de distribuição estiver configurado.
+Na v1.2.11, o pipeline de Release corrige a passagem de `-ldflags` ao `go build` no PowerShell, permitindo que os executáveis x64/x86 sejam realmente gerados e publicados. Os metadados nativos do Windows, ícone, manifesto e a assinatura Authenticode opcional continuam preservados.
 
 
 

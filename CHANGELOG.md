@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.11 - 2026-08-10
+
+- Corrige o build de Release no GitHub Actions: o PowerShell passa `-ldflags` e seu valor como argumentos separados para o `go build`, evitando o erro `invalid value "$ld" for flag -ldflags`.
+- Aplica a mesma forma segura de chamada em `tools/build.ps1` e nos builds x64/x86 da CI.
+- Adiciona teste de regressão para impedir o retorno da sintaxe problemática `-ldflags=$ld`.
+- A Release agora valida que a versão da tag corresponde ao `appVersion` do código antes de compilar.
+- Mantém a lógica de manutenção e recuperação Firebird da v1.2.10 sem alterações.
+
 ## 1.2.10 - 2026-08-10
 
 - Corrige a falha do GitHub Actions em `TestHelpTextCoversDuplicateKeyRecovery`: a Ajuda integrada passa a citar explicitamente `gbak -inactive` no fluxo de recuperação de chaves `PRIMARY KEY`/`UNIQUE` duplicadas.

@@ -1,8 +1,8 @@
 # Distribuição Windows, assinatura e Microsoft Defender
 
-## Objetivo da v1.2.10
+## Objetivo da v1.2.11
 
-A v1.2.10 separa a lógica do Firebird do processo de distribuição do executável. O build de distribuição passa a gerar recursos nativos do Windows (ícone, manifesto e VersionInfo), validar esses dados e oferecer assinatura Authenticode antes de calcular os hashes e publicar a Release.
+A v1.2.11 separa a lógica do Firebird do processo de distribuição do executável. O build de distribuição passa a gerar recursos nativos do Windows (ícone, manifesto e VersionInfo), validar esses dados e oferecer assinatura Authenticode antes de calcular os hashes e publicar a Release.
 
 ## Metadados esperados
 
@@ -11,7 +11,7 @@ Em **Propriedades > Detalhes** do EXE gerado pelo build Windows:
 - Produto: `Firebird Toolbox`
 - Empresa/desenvolvedor: `Marcos De Mori Laiola`
 - Descrição: `Firebird Toolbox - manutenção e recuperação Firebird`
-- Versão: `1.2.10`
+- Versão: `1.2.11`
 - Copyright: `© 2026 Marcos De Mori Laiola. Todos os direitos reservados.`
 
 Os recursos são definidos em `winres/winres.json` e gerados por `go-winres v0.3.3`.
@@ -19,7 +19,7 @@ Os recursos são definidos em `winres/winres.json` e gerados por `go-winres v0.3
 ## Build local
 
 ```powershell
-.\tools\build.ps1 -Version "1.2.10"
+.\tools\build.ps1 -Version "1.2.11"
 ```
 
 Na primeira execução, se `go-winres` não existir no PATH, o script instala a versão fixada `v0.3.3`.
@@ -28,7 +28,7 @@ Na primeira execução, se `go-winres` não existir no PATH, o script instala a 
 
 ```powershell
 .\tools\build.ps1 `
-  -Version "1.2.10" `
+  -Version "1.2.11" `
   -SigningPfx "C:\Certificados\codigo.pfx" `
   -SigningPassword "SENHA_DO_CERTIFICADO"
 ```
