@@ -1,6 +1,6 @@
-# Firebird Toolbox v1.2.14 — Ajuda rápida
+# Firebird Toolbox v1.2.20 — Ajuda rápida
 
-Na v1.2.14, o fluxo avançado ganhou uma etapa obrigatória de **pós-recuperação e saúde**. Depois do restore final, o Toolbox verifica acesso SQL, sweep, corrupção estrutural, transações em limbo, índices e constraints inativos, header e contagens essenciais. Somente uma recuperação completa que passa nos gates críticos recebe `APTO PARA PRODUÇÃO`. O resolvedor de conflitos da v1.2.13 e o hardening de distribuição da v1.2.12 permanecem.
+A v1.2.20 usa **um único executável x86/x64** e detecta o Firebird da própria máquina pelo Registry, Program Files/ProgramW6432, serviços e PATH. A porta vem de `RemoteServicePort` no `firebird.conf` e o fallback é 3050. Os nomes de serviço existentes nos BATs não são usados pela execução.
 
 
 
@@ -54,7 +54,7 @@ Use `Corrigir banco (avançado)` quando:
 
 
 
-## Pós-recuperação e saúde — v1.2.14
+## Pós-recuperação e saúde — mantido da v1.2.14
 
 Depois que o restore final termina, o modo avançado não libera o banco imediatamente. Ele executa uma etapa adicional com:
 

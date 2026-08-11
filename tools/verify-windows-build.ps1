@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$Path,
-    [string]$Version = "1.2.14",
+    [string]$Version = "1.2.20",
     [switch]$RequireSignature,
     [switch]$RequireTimestamp
 )
@@ -26,6 +26,23 @@ if (-not $vi.FileVersion.StartsWith($Version)) {
 if (-not $vi.ProductVersion.StartsWith($Version)) {
     throw "ProductVersion inesperada: $($vi.ProductVersion)"
 }
+
+# Confere diretamente o cabeçalho PE. O Toolbox é aplicativo GUI e nunca deve
+# ser aceito como IMAGE_SUBSYSTEM_WINDOWS_CUI (3), que abre uma janela de console.
+$bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $Path))
+if ($bytes.Length -lt 0x100) { throw "Executavel PE pequeno/invalido: $Path" }
+$peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+if ($peOffset -lt 0 -or ($peOffset + 24 + 70) -gt $bytes.Length) {
+    throw "Cabecalho PE invalido: $Path"
+}
+$signature = [Text.Encoding]::ASCII.GetString($bytes, $peOffset, 4)
+if ($signature -ne "PE`0`0") { throw "Assinatura PE invalida: $Path" }
+$optionalHeader = $peOffset + 24
+$subsystem = [BitConverter]::ToUInt16($bytes, $optionalHeader + 68)
+if ($subsystem -ne 2) {
+    throw "Subsystem Windows incorreto: $subsystem. Esperado 2 (Windows GUI); build console nao pode ser distribuido."
+}
+Write-Host "PE Subsystem: Windows GUI (2)"
 
 $sig = Get-AuthenticodeSignature -FilePath $Path
 if ($RequireSignature -and $sig.Status -ne 'Valid') {

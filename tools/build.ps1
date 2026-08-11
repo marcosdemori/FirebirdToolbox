@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.2.14",
+    [string]$Version = "1.2.20",
     [string]$SigningPfx = "",
     [string]$SigningPassword = "",
     [switch]$AllowUnsignedDev
@@ -38,26 +38,21 @@ try {
     $env:GOARCH = "386"
     go test -c -o (Join-Path $Dist "FirebirdToolbox_tests_x86.exe") .
 
-    Write-Host "[5/7] Compilando aplicativo Windows x64/x86 com metadados..."
+    Write-Host "[5/7] Compilando aplicativo unico Windows x86/x64 com metadados..."
     $ld = "-H=windowsgui -X main.appVersion=$Version"
     $suffix = ""
     if (-not ($SigningPfx -and $SigningPassword)) {
         $suffix = "_UNSIGNED_DEV"
     }
 
-    $env:GOARCH = "amd64"
-    $x64Out = Join-Path $Dist "FirebirdToolbox_v${Version}${suffix}.exe"
-    $goArgs = @("build", "-trimpath", "-buildvcs=false", "-ldflags", $ld, "-o", $x64Out, ".")
-    & go @goArgs
-    if ($LASTEXITCODE -ne 0) { throw "go build x64 falhou com codigo $LASTEXITCODE." }
-
+    # Um unico executavel 386 atende Windows x86 e x64 (WOW64).
     $env:GOARCH = "386"
-    $x86Out = Join-Path $Dist "FirebirdToolbox_v${Version}_x86${suffix}.exe"
-    $goArgs = @("build", "-trimpath", "-buildvcs=false", "-ldflags", $ld, "-o", $x86Out, ".")
+    $universalOut = Join-Path $Dist "FirebirdToolbox_v${Version}_x86_x64${suffix}.exe"
+    $goArgs = @("build", "-trimpath", "-buildvcs=false", "-ldflags", $ld, "-o", $universalOut, ".")
     & go @goArgs
-    if ($LASTEXITCODE -ne 0) { throw "go build x86 falhou com codigo $LASTEXITCODE." }
+    if ($LASTEXITCODE -ne 0) { throw "go build x86/x64 falhou com codigo $LASTEXITCODE." }
 
-    $apps = @($x64Out, $x86Out)
+    $apps = @($universalOut)
     foreach ($app in $apps) {
         & (Join-Path $PSScriptRoot "verify-windows-build.ps1") -Path $app -Version $Version
     }

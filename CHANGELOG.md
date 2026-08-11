@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.2.20 - 2026-08-11
+
+- Corrige o falso bloqueio do gate de saúde em banco SQL Dialect 1: relações tradicionais como `DOCIT` passam a ser consultadas sem aspas duplas (`FROM DOCIT`), evitando o erro real `SQL -104 / Token unknown / "DOCIT"` observado no pós-recuperação.
+- Simplifica a contagem crítica para `SET LIST ON` + `COUNT(*) AS FTB_HEALTH_ROWCOUNT`, sem concatenação/cast desnecessários, mantendo `PLAN (T NATURAL)` para a conferência física.
+- Preserva identificadores delimitados quando o nome realmente exige case-sensitive/forma moderna, sem regredir bancos Dialect 3.
+- Preserva o restore de teste verificado até o fim do pós-recuperação, permitindo comparar de verdade tabelas, índices, PRIMARY KEY/UNIQUE e contagens da relação crítica com o destino final.
+- O restore de referência só é removido depois que todos os gates são aprovados; se um gate falhar, ele permanece preservado para diagnóstico sem repetir todo o resgate.
+- Mantém o executável unificado x86/x64 como Windows GUI, sem console, e preserva a autodetecção portátil de Firebird.
+
+## 1.2.19 - 2026-08-11
+
+- Corrige o executável unificado entregue localmente para usar o subsystem `Windows GUI`; a janela preta de console não é mais criada ao abrir o Toolbox.
+- Mantém a correção owner-draw da v1.2.18, preservando textos, ícones e estados dos botões no build PE32/x86_x64.
+- Adiciona gate em `verify-windows-build.ps1` que lê o cabeçalho PE e exige `Subsystem = 2 (Windows GUI)`, impedindo que CI, build local ou Release aceitem novamente um executável console.
+- Adiciona teste de regressão para o layout nativo de `DRAWITEMSTRUCT` em x86/x64.
+- Mantém integralmente a autodetecção portátil de instalação, serviço e porta Firebird da v1.2.17.
+
+## 1.2.18 - 2026-08-11
+
+- Corrige a regressão visual do build unificado `x86_x64`: os botões voltam a renderizar texto, ícones e estados corretamente em Windows 32-bit e 64-bit.
+- Remove o campo `Padding` manual de `DRAWITEMSTRUCT`; o alinhamento passa a ser o natural da arquitetura do build, evitando leitura deslocada do `WM_DRAWITEM` no executável PE32.
+- Restaura a pintura owner-draw dos botões principais e do rodapé, preservando ícones, foco, destaque de ação primária e estado desabilitado.
+- Mantém intactas as mudanças de portabilidade/detecção automática da v1.2.17.
+
+## 1.2.17 - 2026-08-11
+
+- Unifica a distribuição em um único executável `x86_x64` (PE32/386), compatível com Windows x86 e Windows x64 via WOW64.
+- Mantém validações de CI em x64 e x86, mas a Release passa a publicar apenas um executável.
+- Remove defaults de porta específicos da máquina de desenvolvimento: todas as versões usam 3050 como fallback e respeitam `RemoteServicePort` do `firebird.conf`.
+- Amplia a detecção da instalação por Registry oficial do Firebird nas visões 64/32 bits, `ProgramW6432`, Program Files, Program Files (x86), PATH e serviços Windows.
+- Confirma a versão da instalação encontrada executando `gbak -z`, evitando associar uma pasta customizada à versão errada.
+- Detecta serviços Firebird também pelo `ImagePath` do Registry, inclusive quando o serviço foi renomeado e não contém `Firebird` no nome.
+- Os nomes/portas existentes nos BATs incorporados permanecem somente como referência histórica e não são usados pela execução do Toolbox.
+
+## 1.2.16 - 2026-08-10
+
+- Adiciona `Tempo decorrido` na área de execução, atualizado a cada segundo desde o início efetivo da rotina.
+- O cronômetro congela no encerramento em sucesso, recuperação parcial, conflito, erro ou cancelamento.
+- O tempo total passa a ser registrado no log e exibido nas dialogs finais.
+- Relatórios de recuperação passam a registrar também a duração total.
+- A área de execução ganhou uma linha exclusiva para o cronômetro, preservando a largura da barra de progresso e dos textos já corrigidos.
+- Nenhuma regra de `gfix`, `gbak`, restauração, saneamento de conflitos ou gates de pós-recuperação foi alterada.
+
+## 1.2.15 - 2026-08-10
+
+- Continua automaticamente a recuperação quando a reativação de uma `PRIMARY KEY`/`UNIQUE` revela uma segunda, terceira ou nova chave duplicada; o resolvedor visual reaparece para cada conflito encontrado, com limite de segurança de 24 rodadas.
+- A reativação passa a testar índices inativos individualmente, capturando a saída real do Firebird para localizar o próximo conflito em vez de encerrar apenas com `RDB$PRIMARYxx` inativo.
+- Se não houver nova duplicidade detectável, mas uma relação continuar com índice/constraint inativo, adiciona fallback de reconstrução limpa no Firebird 3.0+: cria uma base intermediária com `gbak -skip_data ^TABELA$`, restaura metadados com índices inativos, copia todos os registros por leitura `PLAN (T NATURAL)`, reativa triggers/índices e confere a contagem antes de gerar novo backup.
+- A reconstrução limpa preserva o banco original e o banco de inspeção; qualquer diferença de contagem, ARRAY não suportado, conflito persistente ou validação estrutural reprovada interrompe a liberação e mantém os artefatos para inspeção.
+- Registra no relatório principal o banco e o backup produzidos pelo fallback de reconstrução limpa.
+- Mantém os gates de saúde da v1.2.14: nenhum banco recebe `APTO PARA PRODUÇÃO` com índice/PK/UNIQUE inativo ou validação estrutural reprovada.
+
 ## 1.2.14 - 2026-08-10
 
 - Adiciona pós-recuperação obrigatório no modo avançado depois do restore final.

@@ -6,9 +6,28 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
+	"unsafe"
 )
+
+func TestDrawItemStructUsesNativeArchitectureLayout(t *testing.T) {
+	got := unsafe.Sizeof(drawItemStruct{})
+	var want uintptr
+	switch runtime.GOARCH {
+	case "386":
+		want = 48
+	case "amd64":
+		want = 64
+	default:
+		t.Skipf("layout not asserted for GOARCH=%s", runtime.GOARCH)
+	}
+	if got != want {
+		t.Fatalf("DRAWITEMSTRUCT layout invalid on %s: got %d bytes, want %d; manual padding can break WM_DRAWITEM", runtime.GOARCH, got, want)
+	}
+}
 
 func TestParseDatabaseHeader(t *testing.T) {
 	output := "Page size\t\t4096\r\nODS version\t\t13.1\r\nDatabase dialect\t1\r\n"
@@ -266,7 +285,7 @@ func TestMergeRecoveryStatsKeepsWorstCounts(t *testing.T) {
 }
 
 func TestProjectCreditAndVersion(t *testing.T) {
-	if appVersion != "1.2.14" {
+	if appVersion != "1.2.17" {
 		t.Fatalf("unexpected app version: %s", appVersion)
 	}
 	if appCredit != "Projeto feito por Marcos De Mori Laiola" {
@@ -287,6 +306,9 @@ func TestUILayoutReadabilityMinimums(t *testing.T) {
 	if uiProgressBarWidth < 700 {
 		t.Fatalf("progress bar is too narrow: %d", uiProgressBarWidth)
 	}
+	if uiElapsedTextWidth < 500 {
+		t.Fatalf("elapsed time area is too narrow: %d", uiElapsedTextWidth)
+	}
 	if uiSkipHintWidth < 290 {
 		t.Fatalf("skip_data help label is too narrow: %d", uiSkipHintWidth)
 	}
@@ -295,6 +317,46 @@ func TestUILayoutReadabilityMinimums(t *testing.T) {
 	}
 	if uiSkipEditX+uiSkipEditWidth+12 > uiSkipHintX {
 		t.Fatalf("skip_data edit and help label overlap: editEnd=%d hintX=%d", uiSkipEditX+uiSkipEditWidth, uiSkipHintX)
+	}
+}
+
+func TestFormatElapsedDuration(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "0 min 00 s"},
+		{59 * time.Second, "0 min 59 s"},
+		{65 * time.Second, "1 min 05 s"},
+		{2*time.Minute + 7*time.Second, "2 min 07 s"},
+	}
+	for _, tc := range cases {
+		if got := formatElapsedDuration(tc.d); got != tc.want {
+			t.Fatalf("formatElapsedDuration(%s) = %q, want %q", tc.d, got, tc.want)
+		}
+	}
+}
+
+func TestExecutionTimerIsWiredIntoWorkflowAndUI(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	for _, want := range []string{
+		`startRunTimer()`,
+		`finishRunTimer()`,
+		`"Tempo decorrido:"`,
+		`"Tempo total de execução: "`,
+		`"Tempo total: "+elapsedTextSnapshot()`,
+		`idElapsed`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("execution timer wiring missing %q", want)
+		}
+	}
+	if strings.Count(text, "finishRunTimer()") < 4 {
+		t.Fatalf("timer must be finalized in cancel, error and success paths")
 	}
 }
 
@@ -641,8 +703,8 @@ func TestWindowsDistributionMetadataConfig(t *testing.T) {
 	for _, want := range []string{
 		`"CompanyName": "Marcos De Mori Laiola"`,
 		`"ProductName": "Firebird Toolbox"`,
-		`"FileVersion": "1.2.14.0"`,
-		`"ProductVersion": "1.2.14"`,
+		`"FileVersion": "1.2.17.0"`,
+		`"ProductVersion": "1.2.17"`,
 		`"execution-level": "as invoker"`,
 		`"use-common-controls-v6": true`,
 	} {
@@ -844,6 +906,178 @@ func TestHelpCoversPostRecoveryHealth(t *testing.T) {
 	for _, want := range []string{"PÓS-RECUPERAÇÃO / SAÚDE", "RELATORIO_SAUDE_PERFORMANCE.txt", "APTO PARA PRODUÇÃO", "NÃO APTO PARA PRODUÇÃO", "PRIMARY KEY/UNIQUE inativos"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("help missing post-recovery concept %q", want)
+		}
+	}
+}
+
+func TestUniqueRelationsFromInactiveIndexes(t *testing.T) {
+	details := []inactiveIndexDetail{
+		{IndexName: "RDB$PRIMARY12", Relation: "DOCIT"},
+		{IndexName: "IDX_DOCIT", Relation: "DOCIT"},
+		{IndexName: "IDX_OTHER", Relation: "OUTRA"},
+		{IndexName: "SYS", Relation: "RDB$RELATIONS"},
+	}
+	got := uniqueRelationsFromInactive(details)
+	if len(got) != 2 || got[0] != "DOCIT" || got[1] != "OUTRA" {
+		t.Fatalf("unexpected relation list: %#v", got)
+	}
+}
+
+func TestCleanRelationBackupPathsAreDeterministic(t *testing.T) {
+	base := `C:\\RECOVERY\\DBCOM_RECOVERY.BAK`
+	if got := cleanRelationBaseBackupPath(base, "DOCIT", 2); !strings.Contains(got, "REBUILD_DOCIT_BASE_02") {
+		t.Fatalf("unexpected clean base backup path: %s", got)
+	}
+	if got := cleanRelationBackupPath(base, "DOCIT", 2); !strings.Contains(got, "REBUILD_DOCIT_02") {
+		t.Fatalf("unexpected clean backup path: %s", got)
+	}
+}
+
+func TestHelpTextCoversIterativeConflictAndCleanRebuild(t *testing.T) {
+	text := helpText()
+	for _, want := range []string{"OUTRA chave duplicada", "continua em loop", "fallback de reconstrução limpa", "leitura NATURAL"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("help text missing iterative recovery concept %q", want)
+		}
+	}
+}
+
+func TestPortableDefaultsUseStandardFirebirdPort(t *testing.T) {
+	for _, version := range versions {
+		if got := defaults[version].Port; got != "3050" {
+			t.Fatalf("Firebird %s fallback port must be portable 3050, got %s", version, got)
+		}
+		if !serviceLooksAutomatic(defaults[version].Service) {
+			t.Fatalf("Firebird %s must not depend on a fixed Windows service name: %q", version, defaults[version].Service)
+		}
+	}
+}
+
+func TestParseRegistryFirebirdRootsSupportsNamedInstances(t *testing.T) {
+	output := `HKEY_LOCAL_MACHINE\SOFTWARE\Firebird Project\Firebird Server\Instances
+    DefaultInstance    REG_SZ    C:\Program Files\Firebird\Firebird_5_0
+    Loja               REG_EXPAND_SZ    D:\Servidores\FB25
+`
+	got := parseRegistryFirebirdRoots(output)
+	if len(got) != 2 {
+		t.Fatalf("unexpected registry roots: %#v", got)
+	}
+	if !strings.EqualFold(got[0], `C:\Program Files\Firebird\Firebird_5_0`) || !strings.EqualFold(got[1], `D:\Servidores\FB25`) {
+		t.Fatalf("unexpected parsed registry roots: %#v", got)
+	}
+}
+
+func TestParseFirebirdVersionOutput(t *testing.T) {
+	cases := map[string]string{
+		"gbak version WI-V5.0.2.1613 Firebird 5.0":  "5.0",
+		"gbak version WI-V2.5.9.27139 Firebird 2.5": "2.5",
+		"Firebird 3.0": "3.0",
+	}
+	for input, want := range cases {
+		if got := parseFirebirdVersionOutput(input); got != want {
+			t.Fatalf("parseFirebirdVersionOutput(%q)=%q want %q", input, got, want)
+		}
+	}
+}
+
+func TestServiceImagePathDiscoveryDoesNotRequireServiceName(t *testing.T) {
+	output := `HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\BancoPrincipal
+    ImagePath    REG_EXPAND_SZ    "D:\Apps\FB5\firebird.exe" -s
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\OutroServico
+    ImagePath    REG_EXPAND_SZ    C:\Windows\System32\svchost.exe -k netsvcs
+`
+	services := parseWindowsServiceImagePaths(output)
+	if len(services) != 2 {
+		t.Fatalf("unexpected service parse: %#v", services)
+	}
+	if services[0].Name != "BancoPrincipal" {
+		t.Fatalf("custom service name was not preserved: %#v", services[0])
+	}
+	if got := firebirdRootFromServiceImage(services[0].ImagePath); !strings.EqualFold(got, `D:\Apps\FB5`) {
+		t.Fatalf("unexpected Firebird service root: %q", got)
+	}
+	if got := firebirdRootFromServiceImage(services[1].ImagePath); got != "" {
+		t.Fatalf("non-Firebird service must be ignored, got %q", got)
+	}
+}
+
+func TestUniversalDistributionIsDocumentedInReleaseWorkflow(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{"GOARCH = '386'", "x86_x64", "FirebirdToolbox_${tag}_x86_x64.exe"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("release workflow missing universal distribution marker %q", want)
+		}
+	}
+}
+
+func TestParseFirebirdConfigPortPrefersConfiguredValues(t *testing.T) {
+	if got := parseFirebirdConfigPort("# RemoteServicePort = 9999\r\nRemoteServicePort = 3055\r\n"); got != "3055" {
+		t.Fatalf("unexpected configured port: %q", got)
+	}
+	if got := parseFirebirdConfigPort("RemoteServiceName = gds_db\r\nRemoteServicePort = 3999\r\n"); got != "3050" {
+		t.Fatalf("RemoteServiceName must take precedence, got %q", got)
+	}
+}
+
+func TestPortFromServiceImagePath(t *testing.T) {
+	cases := map[string]string{
+		`"C:\Firebird\firebird.exe" -s -p 3057`: "3057",
+		`C:\Firebird\fbserver.exe -p=3060`:      "3060",
+		`C:\Firebird\firebird.exe -s`:           "",
+	}
+	for input, want := range cases {
+		if got := portFromServiceImagePath(input); got != want {
+			t.Fatalf("portFromServiceImagePath(%q)=%q want %q", input, got, want)
+		}
+	}
+}
+
+func TestHealthRowCountScriptIsDialect1SafeAndNatural(t *testing.T) {
+	script := healthRowCountScript("DOCIT")
+	for _, want := range []string{"SET LIST ON", "COUNT(*) AS FTB_HEALTH_ROWCOUNT", "FROM DOCIT T", "PLAN (T NATURAL)"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("health row count script missing %q:\n%s", want, script)
+		}
+	}
+	for _, forbidden := range []string{"CAST(COUNT(*)", "FTB_HEALTH_ROWCOUNT|", `FROM "DOCIT"`} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("health row count script reintroduced Dialect 1 incompatibility %q:\n%s", forbidden, script)
+		}
+	}
+}
+
+func TestHealthRowCountIdentifierPreservesDelimitedModernNames(t *testing.T) {
+	if got := healthRowCountIdentifier("CaseSensitiveTable"); got != `"CaseSensitiveTable"` {
+		t.Fatalf("unexpected delimited identifier: %q", got)
+	}
+}
+
+func TestParseHealthRowCountListOutput(t *testing.T) {
+	out := "Database: test, User: SYSDBA\nSQL> \nFTB_HEALTH_ROWCOUNT              203045\nSQL>"
+	n, ok := parseHealthRowCount(out)
+	if !ok || n != 203045 {
+		t.Fatalf("unexpected parsed row count: %d ok=%v", n, ok)
+	}
+}
+
+func TestVerifiedRestoreSurvivesUntilPostRecoveryHealth(t *testing.T) {
+	data, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"Restore de teste preservado temporariamente para comparação pós-recuperação",
+		"cleanupTestRestoreAfterHealth(testPath, &report)",
+		"Restore de referência preservado porque um gate de pós-recuperação falhou",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("restore-reference lifecycle missing %q", want)
 		}
 	}
 }

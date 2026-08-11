@@ -29,11 +29,11 @@ import (
 	"unsafe"
 )
 
-var appVersion = "1.2.14"
+var appVersion = "1.2.20"
 var appCredit = "Projeto feito por Marcos De Mori Laiola"
 
 // Os BATs originais continuam incorporados como referencia/documentacao da logica
-// que originou o utilitario. A v1.2.14 executa gfix/gbak diretamente para manter
+// que originou o utilitario. A v1.2.20 executa gfix/gbak diretamente para manter
 // todo o log dentro da interface e permitir combinar versoes de origem/destino.
 //
 //go:embed scripts/*.bat LEIA-ME.md assets/*.ico
@@ -182,6 +182,7 @@ const (
 	idProgressText   = 1032
 	idResult         = 1033
 	idSkipData       = 1034
+	idElapsed        = 1035
 
 	idHelpCopy  = 4101
 	idHelpClose = 4102
@@ -221,6 +222,7 @@ const (
 	uiFirebirdLabelWidth int32 = 160
 	uiFirebirdFieldX     int32 = 192
 	uiProgressTextWidth  int32 = 780
+	uiElapsedTextWidth   int32 = 744
 	uiProgressBarWidth   int32 = 780
 	uiSkipEditX          int32 = 190
 	uiSkipEditWidth      int32 = 382
@@ -272,9 +274,9 @@ var defaults = map[string]fbDefaults{
 	"2.0": {`C:\Program Files\Firebird\Firebird_2_0`, "Autom\u00e1tico", "3050"},
 	"2.1": {`C:\Program Files\Firebird\Firebird_2_1`, "Autom\u00e1tico", "3050"},
 	"2.5": {`C:\Program Files\Firebird\Firebird_2_5`, "Autom\u00e1tico", "3050"},
-	"3.0": {`C:\Program Files\Firebird\Firebird_3_0`, "Autom\u00e1tico", "3053"},
-	"4.0": {`C:\Program Files\Firebird\Firebird_4_0`, "Autom\u00e1tico", "3054"},
-	"5.0": {`C:\Program Files\Firebird\Firebird_5_0`, "Autom\u00e1tico", "3055"},
+	"3.0": {`C:\Program Files\Firebird\Firebird_3_0`, "Autom\u00e1tico", "3050"},
+	"4.0": {`C:\Program Files\Firebird\Firebird_4_0`, "Autom\u00e1tico", "3050"},
+	"5.0": {`C:\Program Files\Firebird\Firebird_5_0`, "Autom\u00e1tico", "3050"},
 }
 
 type wndClassEx struct {
@@ -359,7 +361,6 @@ type drawItemStruct struct {
 	ItemID     uint32
 	ItemAction uint32
 	ItemState  uint32
-	Padding    uint32
 	HwndItem   syscall.Handle
 	HDC        syscall.Handle
 	RcItem     rect
@@ -459,6 +460,12 @@ var (
 	runMu         sync.Mutex
 	currentCancel context.CancelFunc
 	running       bool
+
+	timerMu            sync.Mutex
+	runStartedAt       time.Time
+	runFinishedAt      time.Time
+	runTimerActive     bool
+	runTimerGeneration uint64
 
 	logMu           sync.Mutex
 	logText         string
@@ -902,6 +909,9 @@ func versionUsesBin(version string) bool {
 func standardFirebirdRoots(version string) []string {
 	dirName := versionDirName(version)
 	bases := []string{
+		// ProgramW6432 e essencial quando o executavel universal x86 roda em
+		// Windows x64: ProgramFiles pode apontar para Program Files (x86).
+		os.Getenv("ProgramW6432"),
 		os.Getenv("ProgramFiles"),
 		os.Getenv("ProgramFiles(x86)"),
 		`C:\Program Files`,
@@ -946,14 +956,391 @@ func isKnownDefaultFB(s string) bool {
 	return strings.Contains(sl, `\firebird\firebird_`)
 }
 
+var registryValuePathRE = regexp.MustCompile(`(?i)\s+REG_(?:SZ|EXPAND_SZ)\s+(.+)$`)
+var firebirdVersionOutputRE = regexp.MustCompile(`(?i)(?:firebird(?:\s+server)?\s+|(?:WI|LI)-V)([1-5]\.\d)`)
+
+type windowsServiceCandidate struct {
+	Name      string
+	ImagePath string
+}
+
+var machineRootsOnce sync.Once
+var machineRootsCache []string
+var serviceCandidatesOnce sync.Once
+var serviceCandidatesCache []windowsServiceCandidate
+var probeVersionMu sync.Mutex
+var probeVersionCache = map[string]string{}
+
+func uniqueCleanPaths(paths []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(paths))
+	for _, raw := range paths {
+		p := strings.Trim(strings.TrimSpace(os.ExpandEnv(raw)), `"`)
+		if p == "" {
+			continue
+		}
+		p = filepath.Clean(p)
+		key := strings.ToLower(p)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, p)
+	}
+	return out
+}
+
+func parseRegistryFirebirdRoots(output string) []string {
+	var roots []string
+	for _, raw := range strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(raw)
+		match := registryValuePathRE.FindStringSubmatch(line)
+		if len(match) != 2 {
+			continue
+		}
+		value := strings.Trim(strings.TrimSpace(match[1]), `"`)
+		if value == "" {
+			continue
+		}
+		roots = append(roots, os.ExpandEnv(value))
+	}
+	return uniqueCleanPaths(roots)
+}
+
+func registryFirebirdRoots() []string {
+	keys := []string{
+		`HKLM\SOFTWARE\Firebird Project\Firebird Server\Instances`,
+		// Compatibilidade com instaladores/ambientes legados que usaram a
+		// grafia sem espaco em FirebirdProject.
+		`HKLM\SOFTWARE\FirebirdProject\Firebird Server\Instances`,
+	}
+	views := []string{"/reg:64", "/reg:32"}
+	var roots []string
+	for _, key := range keys {
+		for _, view := range views {
+			ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+			out, _ := runCommandCapture(ctx, "reg.exe", "query", key, view)
+			cancel()
+			roots = append(roots, parseRegistryFirebirdRoots(out)...)
+		}
+	}
+	return uniqueCleanPaths(roots)
+}
+
+func programFilesFirebirdRoots() []string {
+	bases := uniqueCleanPaths([]string{
+		os.Getenv("ProgramW6432"),
+		os.Getenv("ProgramFiles"),
+		os.Getenv("ProgramFiles(x86)"),
+		`C:\Program Files`,
+		`C:\Program Files (x86)`,
+	})
+	var roots []string
+	for _, base := range bases {
+		firebirdBase := filepath.Join(base, "Firebird")
+		entries, err := os.ReadDir(firebirdBase)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			root := filepath.Join(firebirdBase, entry.Name())
+			if fileExists(filepath.Join(root, "gbak.exe")) || fileExists(filepath.Join(root, "bin", "gbak.exe")) {
+				roots = append(roots, root)
+			}
+		}
+	}
+	return uniqueCleanPaths(roots)
+}
+
+func parseWindowsServiceImagePaths(output string) []windowsServiceCandidate {
+	var result []windowsServiceCandidate
+	current := ""
+	for _, raw := range strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(raw)
+		upper := strings.ToUpper(line)
+		if strings.HasPrefix(upper, `HKEY_LOCAL_MACHINE\SYSTEM\CURRENTCONTROLSET\SERVICES\`) {
+			current = filepath.Base(strings.ReplaceAll(line, `\`, string(filepath.Separator)))
+			continue
+		}
+		if current == "" || !strings.Contains(upper, "IMAGEPATH") {
+			continue
+		}
+		match := registryValuePathRE.FindStringSubmatch(line)
+		if len(match) != 2 {
+			continue
+		}
+		result = append(result, windowsServiceCandidate{Name: current, ImagePath: strings.TrimSpace(os.ExpandEnv(match[1]))})
+	}
+	return result
+}
+
+func registryServiceCandidates(ctx context.Context) []windowsServiceCandidate {
+	var outCandidates []windowsServiceCandidate
+	seen := map[string]bool{}
+	for _, view := range []string{"/reg:64", "/reg:32"} {
+		out, _ := runCommandCapture(ctx, "reg.exe", "query", `HKLM\SYSTEM\CurrentControlSet\Services`, "/s", "/v", "ImagePath", view)
+		for _, c := range parseWindowsServiceImagePaths(out) {
+			key := strings.ToLower(c.Name + "|" + c.ImagePath)
+			if !seen[key] {
+				seen[key] = true
+				outCandidates = append(outCandidates, c)
+			}
+		}
+	}
+	return outCandidates
+}
+
+func machineServiceCandidates() []windowsServiceCandidate {
+	serviceCandidatesOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		serviceCandidatesCache = registryServiceCandidates(ctx)
+	})
+	return append([]windowsServiceCandidate(nil), serviceCandidatesCache...)
+}
+
+func executablePathFromImagePath(image string) string {
+	image = strings.TrimSpace(os.ExpandEnv(image))
+	if image == "" {
+		return ""
+	}
+	if strings.HasPrefix(image, `"`) {
+		if end := strings.Index(image[1:], `"`); end >= 0 {
+			return image[1 : end+1]
+		}
+	}
+	lower := strings.ToLower(image)
+	if idx := strings.Index(lower, ".exe"); idx >= 0 {
+		return strings.Trim(strings.TrimSpace(image[:idx+4]), `"`)
+	}
+	fields := strings.Fields(image)
+	if len(fields) > 0 {
+		return strings.Trim(fields[0], `"`)
+	}
+	return ""
+}
+
+func firebirdRootFromServiceImage(image string) string {
+	exePath := executablePathFromImagePath(image)
+	if exePath == "" {
+		return ""
+	}
+	base := strings.ToLower(filepath.Base(exePath))
+	if base != "firebird.exe" && base != "fbserver.exe" && base != "fb_inet_server.exe" && base != "fbguard.exe" {
+		return ""
+	}
+	dir := filepath.Dir(exePath)
+	if strings.EqualFold(filepath.Base(dir), "bin") {
+		dir = filepath.Dir(dir)
+	}
+	return filepath.Clean(dir)
+}
+
+func serviceFirebirdRoots() []string {
+	var roots []string
+	for _, svc := range machineServiceCandidates() {
+		if root := firebirdRootFromServiceImage(svc.ImagePath); root != "" {
+			roots = append(roots, root)
+		}
+	}
+	return uniqueCleanPaths(roots)
+}
+
+func machineFirebirdRoots() []string {
+	machineRootsOnce.Do(func() {
+		// Descoberta rapida: Registry oficial do Firebird, Program Files e PATH.
+		// A varredura dos servicos fica como fallback em detectFirebird para nao
+		// atrasar a abertura do Toolbox em maquinas com muitos servicos.
+		var roots []string
+		roots = append(roots, registryFirebirdRoots()...)
+		roots = append(roots, programFilesFirebirdRoots()...)
+		if gbak, err := exec.LookPath("gbak.exe"); err == nil {
+			root := filepath.Dir(gbak)
+			if strings.EqualFold(filepath.Base(root), "bin") {
+				root = filepath.Dir(root)
+			}
+			roots = append(roots, root)
+		}
+		machineRootsCache = uniqueCleanPaths(roots)
+	})
+	return append([]string(nil), machineRootsCache...)
+}
+
+func parseFirebirdVersionOutput(output string) string {
+	match := firebirdVersionOutputRE.FindStringSubmatch(output)
+	if len(match) == 2 {
+		return match[1]
+	}
+	lower := strings.ToLower(output)
+	for _, version := range versions {
+		if strings.Contains(lower, "firebird "+version) || strings.Contains(lower, "-v"+version) {
+			return version
+		}
+	}
+	return ""
+}
+
+func versionFromFirebirdPath(root string) string {
+	lower := strings.ToLower(strings.ReplaceAll(filepath.Clean(root), "/", `\`))
+	for _, version := range versions {
+		underscored := strings.ReplaceAll(version, ".", "_")
+		if strings.Contains(lower, "firebird_"+underscored) || strings.Contains(lower, "firebird "+version) || strings.Contains(lower, "firebird"+version) {
+			return version
+		}
+	}
+	return ""
+}
+
+func probeFirebirdVersion(root string) string {
+	root = filepath.Clean(strings.TrimSpace(root))
+	if root == "" {
+		return ""
+	}
+	key := strings.ToLower(root)
+	probeVersionMu.Lock()
+	if v, ok := probeVersionCache[key]; ok {
+		probeVersionMu.Unlock()
+		return v
+	}
+	probeVersionMu.Unlock()
+
+	var detected string
+	for _, version := range versions {
+		gbak := firebirdExe(root, version, "gbak.exe")
+		if !fileExists(gbak) {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		out, _ := runCommandCapture(ctx, gbak, "-z")
+		cancel()
+		detected = parseFirebirdVersionOutput(out)
+		if detected != "" {
+			break
+		}
+	}
+	if detected == "" {
+		detected = versionFromFirebirdPath(root)
+	}
+	probeVersionMu.Lock()
+	probeVersionCache[key] = detected
+	probeVersionMu.Unlock()
+	return detected
+}
+
 func detectFirebird(version string) string {
 	fallback := defaults[version].Root
-	for _, c := range standardFirebirdRoots(version) {
-		if fileExists(firebirdExe(c, version, "gbak.exe")) {
-			return c
+	candidates := append([]string{}, standardFirebirdRoots(version)...)
+	candidates = append(candidates, machineFirebirdRoots()...)
+	candidates = uniqueCleanPaths(candidates)
+
+	// Primeiro confirma a versao pelo proprio gbak. Isso permite encontrar
+	// instalacoes em D:\, pastas customizadas e instancias nomeadas sem depender
+	// do nome usado no computador de desenvolvimento.
+	for _, root := range candidates {
+		if !fileExists(firebirdExe(root, version, "gbak.exe")) {
+			continue
+		}
+		if probeFirebirdVersion(root) == version {
+			return root
+		}
+	}
+	// Fallback seguro para instalacoes antigas em que gbak -z nao identifica a
+	// versao de forma parseavel, mas o diretorio segue a nomenclatura oficial.
+	for _, root := range candidates {
+		if fileExists(firebirdExe(root, version, "gbak.exe")) && versionFromFirebirdPath(root) == version {
+			return root
+		}
+	}
+
+	// Ultimo fallback: instancia instalada como servico em pasta customizada e
+	// sem a chave oficial Instances. Essa busca e deliberadamente tardia.
+	for _, root := range serviceFirebirdRoots() {
+		if !fileExists(firebirdExe(root, version, "gbak.exe")) {
+			continue
+		}
+		if probeFirebirdVersion(root) == version || versionFromFirebirdPath(root) == version {
+			return root
 		}
 	}
 	return fallback
+}
+
+var servicePortArgRE = regexp.MustCompile(`(?i)(?:^|\s)-p(?:\s+|=)?(\d{1,5})(?:\s|$)`)
+
+func resolveFirebirdServiceName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if strings.EqualFold(name, "gds_db") {
+		return "3050"
+	}
+	if port, err := net.LookupPort("tcp", name); err == nil && port > 0 && port <= 65535 {
+		return strconv.Itoa(port)
+	}
+	return ""
+}
+
+func parseFirebirdConfigPort(data string) string {
+	var remotePort string
+	var remoteName string
+	for _, raw := range strings.Split(strings.ReplaceAll(data, "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(strings.SplitN(parts[1], "#", 2)[0])
+		switch {
+		case strings.EqualFold(key, "RemoteServiceName"):
+			remoteName = value
+		case strings.EqualFold(key, "RemoteServicePort"):
+			if port, err := strconv.Atoi(value); err == nil && port > 0 && port <= 65535 {
+				remotePort = strconv.Itoa(port)
+			}
+		}
+	}
+	// O Firebird da prioridade ao RemoteServiceName quando ambos estao ativos.
+	if resolved := resolveFirebirdServiceName(remoteName); resolved != "" {
+		return resolved
+	}
+	return remotePort
+}
+
+func portFromServiceImagePath(image string) string {
+	match := servicePortArgRE.FindStringSubmatch(strings.TrimSpace(image))
+	if len(match) != 2 {
+		return ""
+	}
+	port, err := strconv.Atoi(match[1])
+	if err != nil || port <= 0 || port > 65535 {
+		return ""
+	}
+	return strconv.Itoa(port)
+}
+
+func serviceConfiguredPort(root string) string {
+	root = filepath.Clean(strings.TrimSpace(root))
+	if root == "" {
+		return ""
+	}
+	for _, svc := range machineServiceCandidates() {
+		serviceRoot := firebirdRootFromServiceImage(svc.ImagePath)
+		if serviceRoot == "" || !strings.EqualFold(filepath.Clean(serviceRoot), root) {
+			continue
+		}
+		if port := portFromServiceImagePath(svc.ImagePath); port != "" {
+			return port
+		}
+	}
+	return ""
 }
 
 func detectFirebirdPort(root, version string) string {
@@ -963,23 +1350,15 @@ func detectFirebirdPort(root, version string) string {
 		return fallback
 	}
 	config := filepath.Join(root, "firebird.conf")
-	data, err := os.ReadFile(config)
-	if err != nil {
-		return fallback
-	}
-	for _, raw := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
-		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 || !strings.EqualFold(strings.TrimSpace(parts[0]), "RemoteServicePort") {
-			continue
-		}
-		port := strings.TrimSpace(strings.SplitN(parts[1], "#", 2)[0])
-		if _, err := strconv.Atoi(port); err == nil && port != "" {
+	if data, err := os.ReadFile(config); err == nil {
+		if port := parseFirebirdConfigPort(string(data)); port != "" {
 			return port
 		}
+	}
+	// Instalacoes antigas ou instancias iniciadas com -p podem sobrescrever a
+	// configuracao de arquivo. O ImagePath do servico e consultado como fallback.
+	if port := serviceConfiguredPort(root); port != "" {
+		return port
 	}
 	return fallback
 }
@@ -1044,13 +1423,12 @@ func detectFirebirdService(ctx context.Context, root, preferred string) string {
 	if !serviceLooksAutomatic(preferred) && serviceQueryOK(ctx, preferred) {
 		return preferred
 	}
-	output, err := runCommandCapture(ctx, "sc.exe", "query", "type=", "service", "state=", "all")
-	if err != nil || output == "" {
-		return ""
-	}
 	rootLower := strings.ToLower(filepath.Clean(strings.TrimSpace(root)))
-	seen := map[string]bool{}
 	fallback := ""
+
+	// Caminho rapido: nomes padrao do instalador normalmente contem Firebird.
+	output, _ := runCommandCapture(ctx, "sc.exe", "query", "type=", "service", "state=", "all")
+	seen := map[string]bool{}
 	for _, raw := range strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
 		line := strings.TrimSpace(raw)
 		if !strings.Contains(strings.ToLower(line), "firebird") || !strings.Contains(line, ":") {
@@ -1067,6 +1445,22 @@ func detectFirebirdService(ctx context.Context, root, preferred string) string {
 		qc, _ := runCommandCapture(ctx, "sc.exe", "qc", name)
 		if rootLower != "" && strings.Contains(strings.ToLower(qc), rootLower) {
 			return name
+		}
+	}
+
+	// Fallback portavel: consulta ImagePath dos servicos no Registry. Assim uma
+	// instancia renomeada continua sendo encontrada mesmo que o nome do servico
+	// nao contenha "Firebird".
+	for _, svc := range machineServiceCandidates() {
+		serviceRoot := firebirdRootFromServiceImage(svc.ImagePath)
+		if serviceRoot == "" || !serviceQueryOK(ctx, svc.Name) {
+			continue
+		}
+		if fallback == "" {
+			fallback = svc.Name
+		}
+		if rootLower != "" && strings.EqualFold(filepath.Clean(serviceRoot), filepath.Clean(root)) {
+			return svc.Name
 		}
 	}
 	return fallback
@@ -1368,6 +1762,86 @@ func setProgressState(state uintptr) {
 	}
 }
 
+func formatElapsedDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	totalSeconds := int64(d / time.Second)
+	minutes := totalSeconds / 60
+	seconds := totalSeconds % 60
+	return fmt.Sprintf("%d min %02d s", minutes, seconds)
+}
+
+func elapsedDurationSnapshot() time.Duration {
+	timerMu.Lock()
+	defer timerMu.Unlock()
+	if runStartedAt.IsZero() {
+		return 0
+	}
+	if runTimerActive {
+		return time.Since(runStartedAt)
+	}
+	if runFinishedAt.IsZero() {
+		return 0
+	}
+	return runFinishedAt.Sub(runStartedAt)
+}
+
+func elapsedTextSnapshot() string {
+	return formatElapsedDuration(elapsedDurationSnapshot())
+}
+
+func startRunTimer() {
+	timerMu.Lock()
+	runStartedAt = time.Now()
+	runFinishedAt = time.Time{}
+	runTimerActive = true
+	runTimerGeneration++
+	generation := runTimerGeneration
+	timerMu.Unlock()
+
+	setText(idElapsed, formatElapsedDuration(0))
+
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			timerMu.Lock()
+			if !runTimerActive || generation != runTimerGeneration {
+				timerMu.Unlock()
+				return
+			}
+			elapsed := time.Since(runStartedAt)
+			timerMu.Unlock()
+			setText(idElapsed, formatElapsedDuration(elapsed))
+		}
+	}()
+}
+
+func finishRunTimer() string {
+	timerMu.Lock()
+	if runStartedAt.IsZero() {
+		timerMu.Unlock()
+		setText(idElapsed, formatElapsedDuration(0))
+		return formatElapsedDuration(0)
+	}
+	if runTimerActive {
+		runFinishedAt = time.Now()
+		runTimerActive = false
+		runTimerGeneration++
+	}
+	finished := runFinishedAt
+	started := runStartedAt
+	timerMu.Unlock()
+
+	if finished.IsZero() {
+		finished = time.Now()
+	}
+	text := formatElapsedDuration(finished.Sub(started))
+	setText(idElapsed, text)
+	return text
+}
+
 // setTerminalProgress encerra visualmente a barra em 100% para qualquer estado
 // terminal do fluxo. O ProgressBar nativo do Windows anima PBM_SETPOS; a pequena
 // oscilacao 100 -> 99 -> 100 elimina o atraso visual que podia deixar a barra
@@ -1397,6 +1871,7 @@ func resetRunResult() {
 	lastRecoveryState = ""
 	resultMu.Unlock()
 	setText(idResult, "Aguardando execução")
+	setText(idElapsed, formatElapsedDuration(0))
 	setProgressState(PBST_NORMAL)
 	setProgress(0, "Preparando...")
 }
@@ -1475,6 +1950,7 @@ func successSummary(c workflowConfig) (string, string) {
 	if h.PageSize != "" {
 		lines = append(lines, "Página: "+h.PageSize+" bytes")
 	}
+	lines = append(lines, "Tempo total: "+elapsedTextSnapshot())
 	if c.Routine.Kind == routineRepairAdvanced && strings.Contains(strings.ToUpper(recoveryState), "APTO PARA PRODUÇÃO") && c.Dest != "" {
 		lines = append(lines, "", "IMPORTANTE: o Toolbox não substitui automaticamente o banco usado pelo seu sistema.", "Confirme que a aplicação aponta para o arquivo gerado acima e não para o banco original corrompido.")
 	}
@@ -1497,6 +1973,7 @@ func failureSummary(err error) string {
 		message += "\n\n" + err.Error()
 	}
 	_, _, report := runResultSnapshot()
+	message += "\n\nTempo total: " + elapsedTextSnapshot()
 	if state != "" {
 		message += "\n\nEstado da recuperação: " + state
 	}
@@ -2231,14 +2708,66 @@ func healthRelevantRelations(r *recoveryReport) []string {
 	return result
 }
 
+func healthRowCountIdentifier(relation string) string {
+	value := strings.TrimSpace(relation)
+	if value != "" && value == strings.ToUpper(value) {
+		regular := true
+		for i, r := range value {
+			if i == 0 {
+				regular = (r >= 'A' && r <= 'Z') || r == '_'
+			} else {
+				regular = (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '$'
+			}
+			if !regular {
+				break
+			}
+		}
+		if regular {
+			// Compatibilidade essencial com SQL Dialect 1: nomes tradicionais em
+			// maiúsculas não devem ser envolvidos em aspas duplas. No caso real,
+			// FROM "DOCIT" foi interpretado de forma incompatível e gerou -104.
+			return value
+		}
+	}
+	// Identificadores não tradicionais só são esperados em bancos modernos;
+	// preserve a forma delimitada para não alterar nomes case-sensitive.
+	return sqlIdentifier(value)
+}
+
+func healthRowCountScript(relation string) string {
+	// LIST ON fornece um rótulo estável sem depender de concatenação/cast apenas
+	// para marcar a saída. PLAN NATURAL mantém a leitura física completa usada
+	// pelo gate de conferência pós-recuperação.
+	return "SET HEADING OFF;\nSET LIST ON;\nSET COUNT OFF;\nSELECT COUNT(*) AS FTB_HEALTH_ROWCOUNT FROM " + healthRowCountIdentifier(relation) + " T PLAN (T NATURAL);\nQUIT;\n"
+}
+
+func parseHealthRowCount(output string) (int64, bool) {
+	const marker = "FTB_HEALTH_ROWCOUNT"
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if len(line) < len(marker) || !strings.EqualFold(line[:len(marker)], marker) {
+			continue
+		}
+		rest := strings.TrimSpace(line[len(marker):])
+		rest = strings.TrimLeft(rest, "=:| \t")
+		for _, field := range strings.Fields(rest) {
+			field = strings.Trim(field, "|,; \t")
+			if n, err := strconv.ParseInt(field, 10, 64); err == nil {
+				return n, true
+			}
+		}
+	}
+	return 0, false
+}
+
 func countRelationRows(ctx context.Context, root, version, port, user, password, dbPath, relation string) (int64, error) {
-	marker := "FTB_HEALTH_ROWCOUNT|"
-	script := "SET HEADING OFF;\nSET LIST OFF;\nSET COUNT OFF;\nSELECT '" + marker + "' || CAST(COUNT(*) AS VARCHAR(30)) FROM " + sqlIdentifier(relation) + " T PLAN (T NATURAL);\nQUIT;\n"
+	script := healthRowCountScript(relation)
 	out, err := runISQLScript(ctx, root, version, port, user, password, dbPath, "Conferindo quantidade de registros em "+relation+"...", script)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("consulta de contagem de %s falhou: %w", relation, err)
 	}
-	n, ok := markerInt64(out, marker)
+	n, ok := parseHealthRowCount(out)
 	if !ok {
 		return 0, fmt.Errorf("não foi possível interpretar a contagem de %s", relation)
 	}
@@ -3434,8 +3963,7 @@ func basePartialBackupPath(backup, relation string) string {
 	return base + "_SEM_" + sanitizeFilePart(relation) + ext
 }
 
-func externalDataSource(c workflowConfig, stagePath string) string {
-	version, root, port := salvageEngineConfig(c)
+func externalDataSourceAt(root, version, port, stagePath string) string {
 	if !portReachable(port) {
 		if detected := detectFirebirdPort(root, version); detected != "" {
 			port = detected
@@ -3447,7 +3975,12 @@ func externalDataSource(c workflowConfig, stagePath string) string {
 	return "127.0.0.1/" + port + ":" + stagePath
 }
 
-func copyRelationBlock(meta relationMetadata, c workflowConfig, stagePath string, whereClause string, natural bool) (string, error) {
+func externalDataSource(c workflowConfig, stagePath string) string {
+	version, root, port := salvageEngineConfig(c)
+	return externalDataSourceAt(root, version, port, stagePath)
+}
+
+func copyRelationBlockToDataSource(meta relationMetadata, user, password, dataSource, whereClause string, natural bool) (string, error) {
 	if len(meta.Columns) == 0 {
 		return "", errors.New("relação sem colunas copiáveis")
 	}
@@ -3482,9 +4015,13 @@ func copyRelationBlock(meta relationMetadata, c workflowConfig, stagePath string
 	b.WriteString("DECLARE VARIABLE N BIGINT;\nBEGIN\n  N = 0;\n")
 	b.WriteString("  FOR " + selectSQL + " INTO " + strings.Join(vars, ", ") + " DO\n  BEGIN\n")
 	b.WriteString("    EXECUTE STATEMENT (" + sqlStringLiteral(insertSQL) + ") (" + strings.Join(vars, ", ") + ")\n")
-	b.WriteString("      ON EXTERNAL DATA SOURCE " + sqlStringLiteral(externalDataSource(c, stagePath)) + " AS USER " + sqlStringLiteral(c.User) + " PASSWORD " + sqlStringLiteral(c.Password) + " WITH COMMON TRANSACTION;\n")
+	b.WriteString("      ON EXTERNAL DATA SOURCE " + sqlStringLiteral(dataSource) + " AS USER " + sqlStringLiteral(user) + " PASSWORD " + sqlStringLiteral(password) + " WITH COMMON TRANSACTION;\n")
 	b.WriteString("    N = N + 1;\n  END\n  FTB_RESULT = 'FTB_ROWS=' || CAST(N AS VARCHAR(30));\n  SUSPEND;\nEND^\nSET TERM ;^\nCOMMIT;\nQUIT;\n")
 	return b.String(), nil
+}
+
+func copyRelationBlock(meta relationMetadata, c workflowConfig, stagePath string, whereClause string, natural bool) (string, error) {
+	return copyRelationBlockToDataSource(meta, c.User, c.Password, externalDataSource(c, stagePath), whereClause, natural)
 }
 
 func parseRecoveredRows(output string) int64 {
@@ -3763,6 +4300,10 @@ type recoveryReport struct {
 	DuplicateRepairApplied    bool
 	DuplicateRowsRemoved      int64
 	DuplicateConflicts        []restoreDuplicateConflict
+	CleanRebuildAttempted     bool
+	CleanRebuildRelation      string
+	CleanRebuildStage         string
+	CleanRebuildBackup        string
 	BackupFailureDetails      string
 	FirebirdLogExcerpt        string
 	TestRestoreState          string
@@ -3801,6 +4342,7 @@ func writeRecoveryReport(r recoveryReport) error {
 	b.WriteString("Início: " + r.Started.Format("2006-01-02 15:04:05") + "\r\n")
 	if !r.Finished.IsZero() {
 		b.WriteString("Fim: " + r.Finished.Format("2006-01-02 15:04:05") + "\r\n")
+		b.WriteString("Duração total: " + formatElapsedDuration(r.Finished.Sub(r.Started)) + "\r\n")
 	}
 
 	b.WriteString("\r\nORIGEM\r\n")
@@ -3943,6 +4485,12 @@ func writeRecoveryReport(r recoveryReport) error {
 	}
 	if r.DuplicateRepairedBackup != "" {
 		b.WriteString("Backup após saneamento de duplicidades: " + r.DuplicateRepairedBackup + "\r\n")
+	}
+	if r.CleanRebuildStage != "" {
+		b.WriteString("Banco de reconstrução limpa: " + r.CleanRebuildStage + "\r\n")
+	}
+	if r.CleanRebuildBackup != "" {
+		b.WriteString("Backup após reconstrução limpa de " + r.CleanRebuildRelation + ": " + r.CleanRebuildBackup + "\r\n")
 	}
 	if r.HealthReport != "" {
 		b.WriteString("Relatório de saúde e pós-recuperação: " + r.HealthReport + "\r\n")
@@ -4144,6 +4692,110 @@ func activateAllInactiveUserIndexes(ctx context.Context, root, version, port, us
 		return fmt.Errorf("%d índice(s) continuaram inativos após o saneamento: %s", len(remaining), strings.Join(shown, ", "))
 	}
 	return nil
+}
+
+type inactiveIndexDetail struct {
+	IndexName      string
+	Relation       string
+	ConstraintName string
+	ConstraintType string
+}
+
+func inactiveIndexDetails(ctx context.Context, root, version, port, user, password, dbPath string) ([]inactiveIndexDetail, error) {
+	script := "SET HEADING OFF;\nSET LIST OFF;\nSET COUNT OFF;\n" +
+		"SELECT 'FTB_IIDX|' || TRIM(i.RDB$INDEX_NAME) || '|' || TRIM(i.RDB$RELATION_NAME) || '|' || COALESCE(TRIM(rc.RDB$CONSTRAINT_NAME), '') || '|' || COALESCE(TRIM(rc.RDB$CONSTRAINT_TYPE), '') " +
+		"FROM RDB$INDICES i LEFT JOIN RDB$RELATION_CONSTRAINTS rc ON rc.RDB$INDEX_NAME = i.RDB$INDEX_NAME " +
+		"WHERE COALESCE(i.RDB$SYSTEM_FLAG,0) = 0 AND COALESCE(i.RDB$INDEX_INACTIVE,0) <> 0 ORDER BY i.RDB$RELATION_NAME, i.RDB$INDEX_NAME;\nQUIT;\n"
+	out, err := runISQLScript(ctx, root, version, port, user, password, dbPath, "Mapeando índices inativos restantes...", script)
+	if err != nil {
+		return nil, err
+	}
+	var result []inactiveIndexDetail
+	for _, line := range markerLines(out, "FTB_IIDX|") {
+		parts := strings.SplitN(line, "|", 4)
+		if len(parts) < 2 {
+			continue
+		}
+		d := inactiveIndexDetail{IndexName: strings.TrimSpace(parts[0]), Relation: strings.TrimSpace(parts[1])}
+		if len(parts) >= 3 {
+			d.ConstraintName = strings.TrimSpace(parts[2])
+		}
+		if len(parts) >= 4 {
+			d.ConstraintType = strings.TrimSpace(parts[3])
+		}
+		if d.IndexName != "" && d.Relation != "" {
+			result = append(result, d)
+		}
+	}
+	return result, nil
+}
+
+func activateInactiveIndexesDetectingConflicts(ctx context.Context, root, version, port, user, password, dbPath string) ([]inactiveIndexDetail, []restoreDuplicateConflict, error) {
+	details, err := inactiveIndexDetails(ctx, root, version, port, user, password, dbPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(details) == 0 {
+		return nil, nil, nil
+	}
+	var lastFailure string
+	for pass := 1; pass <= 12; pass++ {
+		progress := false
+		for _, detail := range details {
+			script := "SET BAIL ON;\nALTER INDEX " + sqlIdentifier(detail.IndexName) + " ACTIVE;\nCOMMIT;\nQUIT;\n"
+			out, activateErr := runISQLScript(ctx, root, version, port, user, password, dbPath, fmt.Sprintf("Tentando reconstruir índice %s (passo %d)...", detail.IndexName, pass), script)
+			if activateErr == nil {
+				progress = true
+				continue
+			}
+			if conflicts := parseRestoreDuplicateConflicts(out); len(conflicts) > 0 {
+				for i := range conflicts {
+					if conflicts[i].IndexName == "" {
+						conflicts[i].IndexName = detail.IndexName
+					}
+				}
+				return details, conflicts, nil
+			}
+			if strings.TrimSpace(out) != "" {
+				lastFailure = tailText(out, 16)
+			} else {
+				lastFailure = activateErr.Error()
+			}
+		}
+		remaining, mapErr := inactiveIndexDetails(ctx, root, version, port, user, password, dbPath)
+		if mapErr != nil {
+			return nil, nil, mapErr
+		}
+		if len(remaining) == 0 {
+			return nil, nil, nil
+		}
+		if !progress && len(remaining) >= len(details) {
+			details = remaining
+			break
+		}
+		details = remaining
+	}
+	if lastFailure != "" {
+		writeRecoveryTechLine("ÍNDICES AINDA INATIVOS APÓS TENTATIVAS: " + lastFailure)
+	}
+	return details, nil, nil
+}
+
+func uniqueRelationsFromInactive(details []inactiveIndexDetail) []string {
+	seen := map[string]bool{}
+	var result []string
+	for _, detail := range details {
+		relation := strings.TrimSpace(detail.Relation)
+		if relation == "" || strings.HasPrefix(strings.ToUpper(relation), "RDB$") || strings.HasPrefix(strings.ToUpper(relation), "MON$") || strings.HasPrefix(strings.ToUpper(relation), "SEC$") {
+			continue
+		}
+		key := strings.ToUpper(relation)
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, relation)
+		}
+	}
+	return result
 }
 
 type duplicateKeyPart struct {
@@ -4755,6 +5407,187 @@ func deduplicatedBackupPath(backup string, round int) string {
 	return fmt.Sprintf("%s_SEM_DUPLICIDADES_%02d%s", base, round, ext)
 }
 
+func conflictLoopBackupPath(backup string, round int) string {
+	ext := filepath.Ext(backup)
+	base := strings.TrimSuffix(backup, ext)
+	if ext == "" {
+		ext = ".BAK"
+	}
+	return fmt.Sprintf("%s_CONFLITOS_%02d%s", base, round, ext)
+}
+
+func cleanRelationBaseBackupPath(backup, relation string, round int) string {
+	ext := filepath.Ext(backup)
+	base := strings.TrimSuffix(backup, ext)
+	if ext == "" {
+		ext = ".BAK"
+	}
+	return fmt.Sprintf("%s_REBUILD_%s_BASE_%02d%s", base, sanitizeFilePart(relation), round, ext)
+}
+
+func cleanRelationBackupPath(backup, relation string, round int) string {
+	ext := filepath.Ext(backup)
+	base := strings.TrimSuffix(backup, ext)
+	if ext == "" {
+		ext = ".BAK"
+	}
+	return fmt.Sprintf("%s_REBUILD_%s_%02d%s", base, sanitizeFilePart(relation), round, ext)
+}
+
+func cleanRelationStagePath(testPath, relation string, round int) string {
+	ext := filepath.Ext(testPath)
+	base := strings.TrimSuffix(testPath, ext)
+	if ext == "" {
+		ext = ".RED"
+	}
+	return fmt.Sprintf("%s_REBUILD_%s_%02d%s", base, sanitizeFilePart(relation), round, ext)
+}
+
+func setRelationTriggersActive(ctx context.Context, root, version, port, user, password, dbPath string, triggers []string, active bool) error {
+	if len(triggers) == 0 {
+		return nil
+	}
+	state := "INACTIVE"
+	label := "Desativando triggers da relação no banco de reconstrução..."
+	if active {
+		state = "ACTIVE"
+		label = "Reativando triggers da relação no banco de reconstrução..."
+	}
+	var b strings.Builder
+	b.WriteString("SET BAIL ON;\n")
+	for _, name := range triggers {
+		b.WriteString("ALTER TRIGGER " + sqlIdentifier(name) + " " + state + ";\n")
+	}
+	b.WriteString("COMMIT;\nQUIT;\n")
+	_, err := runISQLScript(ctx, root, version, port, user, password, dbPath, label, b.String())
+	return err
+}
+
+func backupWithoutRelationData(ctx context.Context, root, version, port, user, password, dbPath, relation, backup string) error {
+	if versionNumber(version) < 3.0 {
+		return fmt.Errorf("a reconstrução limpa automática exige Firebird 3.0 ou superior para usar -skip_data")
+	}
+	gbak := firebirdExe(root, version, "gbak.exe")
+	if !fileExists(gbak) {
+		return fmt.Errorf("não encontrei gbak.exe do Firebird %s", version)
+	}
+	_ = os.Remove(backup)
+	skipPattern := "^" + regexp.QuoteMeta(relation) + "$"
+	args := []string{"-b", "-v", "-skip_data", skipPattern, "-user", user, "-pass", password, databaseConnection(port, dbPath), backup}
+	_, err := runRecoveryCapture(ctx, "Criando base limpa sem os dados de "+relation+"...", gbak, args...)
+	if err != nil {
+		return err
+	}
+	if !fileExists(backup) {
+		return fmt.Errorf("o backup-base sem %s não foi criado", relation)
+	}
+	return nil
+}
+
+func rebuildRelationCleanBackup(ctx context.Context, c workflowConfig, sourceDB, currentBackup string, report *recoveryReport, relation, version, root, port string, round int) (string, string, error) {
+	if strings.TrimSpace(relation) == "" {
+		return "", "", errors.New("relação não informada para reconstrução limpa")
+	}
+	if versionNumber(version) < 3.0 {
+		return "", "", fmt.Errorf("%s continuou com índice inativo e a reconstrução limpa automática requer Firebird 3.0 ou superior", relation)
+	}
+	meta, err := loadRelationMetadataAt(ctx, root, version, port, c.User, c.Password, sourceDB, relation)
+	if err != nil {
+		return "", "", fmt.Errorf("não foi possível ler os metadados de %s para reconstrução limpa: %w", relation, err)
+	}
+	if hasUnsupportedArray(meta) {
+		return "", "", fmt.Errorf("%s possui coluna ARRAY; reconstrução limpa automática não é segura", relation)
+	}
+	sourceCount, countErr := countRelationRows(ctx, root, version, port, c.User, c.Password, sourceDB, relation)
+	if countErr != nil {
+		return "", "", fmt.Errorf("não foi possível contar %s antes da reconstrução limpa: %w", relation, countErr)
+	}
+
+	baseBackup := cleanRelationBaseBackupPath(currentBackup, relation, round)
+	if err := backupWithoutRelationData(ctx, root, version, port, c.User, c.Password, sourceDB, relation, baseBackup); err != nil {
+		return "", "", fmt.Errorf("falha ao criar base para reconstrução limpa de %s: %w", relation, err)
+	}
+	stagePath := cleanRelationStagePath(sourceDB, relation, round)
+	_ = os.Remove(stagePath)
+	if err := restoreBackupWithInactiveIndexes(ctx, root, version, port, c.User, c.Password, baseBackup, stagePath); err != nil {
+		return "", "", fmt.Errorf("não foi possível restaurar a base limpa de %s: %w", relation, err)
+	}
+	if err := setRelationTriggersActive(ctx, root, version, port, c.User, c.Password, stagePath, meta.ActiveTriggers, false); err != nil {
+		return "", stagePath, fmt.Errorf("não foi possível desativar os triggers de %s no banco limpo: %w", relation, err)
+	}
+	triggersNeedRestore := true
+	defer func() {
+		if triggersNeedRestore {
+			_ = setRelationTriggersActive(context.Background(), root, version, port, c.User, c.Password, stagePath, meta.ActiveTriggers, true)
+		}
+	}()
+
+	copyScript, err := copyRelationBlockToDataSource(meta, c.User, c.Password, externalDataSourceAt(root, version, port, stagePath), "", true)
+	if err != nil {
+		return "", stagePath, err
+	}
+	out, copyErr := runISQLScript(ctx, root, version, port, c.User, c.Password, sourceDB, "Reconstruindo "+relation+" em estrutura limpa por leitura NATURAL...", copyScript)
+	if copyErr != nil {
+		if conflicts := parseRestoreDuplicateConflicts(out); len(conflicts) > 0 {
+			first := conflicts[0]
+			return "", stagePath, fmt.Errorf("a reconstrução limpa encontrou nova duplicidade em %s (%s)", first.Relation, duplicateConflictKeyLabel(first))
+		}
+		return "", stagePath, fmt.Errorf("falha ao copiar os registros de %s para a estrutura limpa: %w", relation, copyErr)
+	}
+	recovered := parseRecoveredRows(out)
+	if recovered != sourceCount {
+		return "", stagePath, fmt.Errorf("reconstrução limpa de %s copiou %d de %d registros; banco preservado para inspeção", relation, recovered, sourceCount)
+	}
+	if err := setRelationTriggersActive(ctx, root, version, port, c.User, c.Password, stagePath, meta.ActiveTriggers, true); err != nil {
+		return "", stagePath, fmt.Errorf("dados de %s foram copiados, mas os triggers não puderam ser reativados: %w", relation, err)
+	}
+	triggersNeedRestore = false
+
+	remaining, conflicts, activateErr := activateInactiveIndexesDetectingConflicts(ctx, root, version, port, c.User, c.Password, stagePath)
+	if activateErr != nil {
+		return "", stagePath, fmt.Errorf("falha ao reconstruir índices após recriar %s: %w", relation, activateErr)
+	}
+	if len(conflicts) > 0 {
+		return "", stagePath, fmt.Errorf("a estrutura limpa de %s ainda apresentou conflito de chave %s", relation, duplicateConflictKeyLabel(conflicts[0]))
+	}
+	if len(remaining) > 0 {
+		var names []string
+		for _, item := range remaining {
+			names = append(names, item.IndexName)
+		}
+		return "", stagePath, fmt.Errorf("a estrutura limpa de %s ainda possui índice(s) inativo(s): %s", relation, strings.Join(names, ", "))
+	}
+
+	stageCount, err := countRelationRows(ctx, root, version, port, c.User, c.Password, stagePath, relation)
+	if err != nil || stageCount != sourceCount {
+		return "", stagePath, fmt.Errorf("a conferência final de %s falhou após reconstrução limpa: origem=%d destino=%d", relation, sourceCount, stageCount)
+	}
+	gfix := firebirdExe(root, version, "gfix.exe")
+	if fileExists(gfix) {
+		args := []string{"-user", c.User, "-pass", c.Password, "-v", "-full"}
+		if versionNumber(version) >= 2.1 {
+			args = append(args, "-no_update")
+		}
+		args = append(args, databaseConnection(port, stagePath))
+		validationOutput, validationErr := runRecoveryCapture(ctx, "Validando banco após reconstrução limpa de "+relation+"...", gfix, args...)
+		if validationErr != nil || toolOutputHasOperationalFailure(validationOutput) || parseRecoveryStats(validationOutput).HasCorruption() {
+			return "", stagePath, fmt.Errorf("o banco reconstruído após recriar %s não passou na validação estrutural", relation)
+		}
+	}
+
+	finalBackup := cleanRelationBackupPath(currentBackup, relation, round)
+	if err := backupDatabaseWithEngine(ctx, root, version, port, c.User, c.Password, stagePath, finalBackup, "Gerando backup após reconstrução limpa de "+relation+"..."); err != nil {
+		return "", stagePath, fmt.Errorf("não foi possível gerar backup da estrutura limpa de %s: %w", relation, err)
+	}
+	report.CleanRebuildAttempted = true
+	report.CleanRebuildRelation = relation
+	report.CleanRebuildStage = stagePath
+	report.CleanRebuildBackup = finalBackup
+	report.action(fmt.Sprintf("Relação %s reconstruída em estrutura limpa; %d registro(s) copiado(s) por leitura NATURAL e todos os índices reativados", relation, sourceCount))
+	appendLog(fmt.Sprintf("✓ %s reconstruída em estrutura limpa com %d registro(s); novo restore de teste será executado.", relation, sourceCount))
+	return finalBackup, stagePath, nil
+}
+
 func writeDuplicateConflictReport(path, snapshot string, conflicts []restoreDuplicateConflict, exports []string) error {
 	var b strings.Builder
 	b.WriteString("FIREBIRD TOOLBOX - CONFLITOS DE CHAVE ÚNICA / PRIMÁRIA\r\n")
@@ -4931,10 +5764,49 @@ func repairRestoreDuplicateConflicts(ctx context.Context, c workflowConfig, back
 		report.action(fmt.Sprintf("Conflito %s / %s saneado na cópia de trabalho; REGISTRO %d preservado e %d ocorrência(s) extra(s) removida(s)", conflict.Relation, duplicateConflictKeyLabel(*conflict), keepOrdinal, conflict.RowsRemoved))
 	}
 	report.DuplicateConflicts = append(report.DuplicateConflicts, analyzed...)
-	_ = writeDuplicateConflictReport(conflictReport, snapshot, analyzed, exports)
+	_ = writeDuplicateConflictReport(conflictReport, snapshot, report.DuplicateConflicts, nil)
 
-	if err := activateAllInactiveUserIndexes(ctx, root, version, port, c.User, c.Password, testPath); err != nil {
-		return "", fmt.Errorf("as duplicidades foram tratadas, mas nem todos os índices puderam ser reconstruídos: %w", err)
+	remainingIndexes, nextConflicts, activationErr := activateInactiveIndexesDetectingConflicts(ctx, root, version, port, c.User, c.Password, testPath)
+	if activationErr != nil {
+		return "", fmt.Errorf("falha ao reconstruir os índices após o saneamento: %w", activationErr)
+	}
+	if len(nextConflicts) > 0 {
+		if round >= 24 {
+			return "", fmt.Errorf("o limite de 24 rodadas de conflitos foi atingido; banco preservado para inspeção")
+		}
+		first := nextConflicts[0]
+		appendLog("Novo conflito encontrado ao reconstruir os índices: " + first.Relation + " | " + duplicateConflictKeyLabel(first))
+		report.action("Após resolver um conflito, a reconstrução dos índices encontrou automaticamente outra chave duplicada; o saneamento continuará sem abandonar o fluxo")
+		loopBackup := conflictLoopBackupPath(backup, round)
+		if err := backupDatabaseWithEngine(ctx, root, version, port, c.User, c.Password, testPath, loopBackup, "Preservando estado saneado antes de resolver o próximo conflito..."); err != nil {
+			return "", fmt.Errorf("foi encontrado outro conflito, mas não foi possível preservar o estado intermediário: %w", err)
+		}
+		return repairRestoreDuplicateConflicts(ctx, c, loopBackup, testPath, report, nextConflicts, version, root, port, round+1)
+	}
+	if len(remainingIndexes) > 0 {
+		relations := uniqueRelationsFromInactive(remainingIndexes)
+		if len(relations) == 0 {
+			var names []string
+			for _, item := range remainingIndexes {
+				names = append(names, item.IndexName)
+			}
+			return "", fmt.Errorf("as duplicidades foram tratadas, mas %d índice(s) permaneceram inativos sem relação de usuário reconstruível: %s", len(remainingIndexes), strings.Join(names, ", "))
+		}
+		relation := relations[0]
+		report.CleanRebuildAttempted = true
+		report.CleanRebuildRelation = relation
+		report.warning("Nenhuma nova chave duplicada foi encontrada, mas índices de " + relation + " continuaram inativos; iniciando reconstrução limpa da relação em banco temporário")
+		appendLog("Índices ainda inativos sem nova duplicidade detectável. Reconstruindo " + relation + " em estrutura limpa...")
+		rebuiltBackup, stagePath, rebuildErr := rebuildRelationCleanBackup(ctx, c, testPath, backup, report, relation, version, root, port, round)
+		if rebuildErr != nil {
+			report.CleanRebuildStage = stagePath
+			return "", fmt.Errorf("a reconstrução limpa de %s não foi concluída: %w", relation, rebuildErr)
+		}
+		report.DuplicateConflictWork = stagePath
+		report.DuplicateRepairApplied = true
+		report.DuplicateRepairedBackup = rebuiltBackup
+		report.action("Fallback de reconstrução limpa concluído; o novo backup será submetido a restore completo e gates de saúde")
+		return rebuiltBackup, nil
 	}
 	report.action("Todos os índices de usuário do restore com -inactive foram reconstruídos e reativados após o saneamento")
 
@@ -5016,12 +5888,11 @@ func verifyBackupByRestoreDepth(ctx context.Context, c workflowConfig, backup, t
 				result.Header = parseDatabaseHeader(headerOutput)
 			}
 		}
-		if removeErr := os.Remove(testPath); removeErr != nil {
-			report.warning("Não foi possível excluir o banco temporário após o teste: " + removeErr.Error())
-			report.TestRestore = testPath
-		} else {
-			report.TestRestore = "temporário removido após validação"
-		}
+		// Preserve o restore verificado até os gates de pós-recuperação. Ele é a
+		// referência independente para comparar metadados e contagens do destino
+		// final. Só é removido depois que todos os gates forem aprovados.
+		report.TestRestore = testPath
+		report.action("Restore de teste preservado temporariamente para comparação pós-recuperação")
 		return result, nil
 	}
 
@@ -5068,12 +5939,8 @@ func verifyBackupByRestoreDepth(ctx context.Context, c workflowConfig, backup, t
 				result.Header = parseDatabaseHeader(headerOutput)
 			}
 		}
-		if removeErr := os.Remove(testPath); removeErr != nil {
-			report.warning("Não foi possível excluir o banco temporário após o teste com -one_at_a_time: " + removeErr.Error())
-			report.TestRestore = testPath
-		} else {
-			report.TestRestore = "temporário removido após validação com -one_at_a_time"
-		}
+		report.TestRestore = testPath
+		report.action("Restore de teste com -one_at_a_time preservado temporariamente para comparação pós-recuperação")
 		return result, nil
 	}
 	if fileExists(testPath) {
@@ -5589,6 +6456,10 @@ func runAdvancedRecovery(ctx context.Context, c workflowConfig) (retErr error) {
 			}
 			report.FinalState += "NÃO APTO PARA PRODUÇÃO"
 		}
+		if fileExists(testPath) {
+			report.TestRestore = testPath
+			report.warning("Restore de referência preservado porque um gate de pós-recuperação falhou; use-o para comparar o destino sem repetir todo o resgate")
+		}
 		appendLog("ERRO: pós-recuperação reprovou o banco. Consulte RELATORIO_SAUDE_PERFORMANCE.txt antes de qualquer uso.")
 		return healthErr
 	}
@@ -5605,11 +6476,25 @@ func runAdvancedRecovery(ctx context.Context, c workflowConfig) (retErr error) {
 	setProgress(99, "Pós-recuperação aprovada")
 	appendLog("✓ Pós-recuperação aprovada: " + health.Readiness + ".")
 	appendLog("Relatório de saúde: " + healthReportPath)
+	cleanupTestRestoreAfterHealth(testPath, &report)
 	if c.TargetVersion != "" && c.Dest != "" {
 		appendLog("IMPORTANTE: o Toolbox não troca automaticamente o banco usado pela aplicação. Use/configure o sistema para o arquivo final aprovado: " + c.Dest)
 		report.warning("O banco original não foi substituído automaticamente; antes de reabrir o sistema, confirme que a aplicação aponta para o destino final aprovado")
 	}
 	return nil
+}
+
+func cleanupTestRestoreAfterHealth(testPath string, report *recoveryReport) {
+	if strings.TrimSpace(testPath) == "" || !fileExists(testPath) {
+		return
+	}
+	if err := os.Remove(testPath); err != nil {
+		report.warning("Pós-recuperação aprovada, mas não foi possível excluir o restore de referência: " + err.Error())
+		report.TestRestore = testPath
+		return
+	}
+	report.TestRestore = "temporário removido após comparação pós-recuperação aprovada"
+	report.action("Restore de referência comparado com o destino final e removido após aprovação dos gates")
 }
 
 func runRepair(ctx context.Context, c workflowConfig, advanced bool) error {
@@ -5722,12 +6607,16 @@ func executeWorkflow() {
 
 	clearLog()
 	resetRunResult()
+	startRunTimer()
 	appendLog("Iniciando rotina: " + c.Routine.Name)
+	appendLog("Cronômetro iniciado: " + time.Now().Format("15:04:05"))
 	if c.Routine.Kind != routineRestore {
 		appendLog("Firebird da rotina: " + c.SourceVersion + " | Porta: " + c.SourcePort)
+		appendLog("Instalação Firebird da rotina: " + c.FbSource)
 	}
 	if c.TargetVersion != "" {
 		appendLog("Restaurar para: Firebird " + c.TargetVersion + " | Porta: " + c.TargetPort)
+		appendLog("Instalação Firebird da restauração: " + c.FbTarget)
 	}
 	appendLog("Origem: " + c.Source)
 	if detailedLog {
@@ -5769,14 +6658,18 @@ func executeWorkflow() {
 		}
 
 		if errors.Is(err, context.Canceled) {
+			elapsed := finishRunTimer()
 			appendLog("Rotina interrompida pelo usuário.")
+			appendLog("Tempo total de execução: " + elapsed)
 			setStatus("Rotina interrompida.")
 			setText(idResult, "■ Interrompido")
 			setTerminalProgress(PBST_PAUSED, "Interrompido pelo usuário")
 			return
 		}
 		if err != nil {
+			elapsed := finishRunTimer()
 			appendLog("ERRO: " + err.Error())
+			appendLog("Tempo total de execução: " + elapsed)
 			state := strings.ToUpper(recoveryStateSnapshot())
 			if strings.Contains(state, "NÃO APTO PARA PRODUÇÃO") {
 				setStatus("Banco recuperado, mas reprovado nos gates de saúde; não usar em produção.")
@@ -5803,6 +6696,8 @@ func executeWorkflow() {
 			}
 			return
 		}
+		elapsed := finishRunTimer()
+		appendLog("Tempo total de execução: " + elapsed)
 		state := strings.ToUpper(recoveryStateSnapshot())
 		dialogText, compact := successSummary(c)
 		setText(idResult, compact)
@@ -5842,6 +6737,9 @@ func helpText() string {
 VISÃO GERAL
 O Firebird Toolbox centraliza manutenção, correção, restauração e recuperação de bancos Firebird. O programa executa as ferramentas oficiais gfix, gbak e gstat e mantém o log dentro da própria interface.
 
+CRONÔMETRO DE EXECUÇÃO
+Ao clicar em Executar e confirmar a rotina, o campo Tempo decorrido começa em 0 min 00 s e é atualizado a cada segundo. A contagem é congelada quando o processo termina, inclusive em sucesso, recuperação parcial, conflito, erro ou cancelamento. O tempo total também é registrado no log e nas confirmações finais.
+
 1. INÍCIO RÁPIDO
 1) Escolha a rotina.
 2) Informe a versão do Firebird que abrirá o banco de origem.
@@ -5866,7 +6764,9 @@ Corrigir banco (avançado)
 - A recuperação dos registros começa com leitura NATURAL, evitando índices corrompidos. Se necessário e houver chave primária numérica simples, o Toolbox divide a faixa da chave até isolar registros que realmente não podem ser lidos.
 - Se o restore falhar ao ativar uma PRIMARY KEY/UNIQUE por chave duplicada, o Toolbox NÃO usa -one_at_a_time: refaz a restauração com gbak -inactive (todos os índices inativos), preserva uma cópia para auditoria, identifica a chave problemática e compara as ocorrências.
 - Duplicidades logicamente idênticas podem ser saneadas automaticamente na cópia de trabalho, mantendo a primeira ocorrência física. Se houver campos diferentes, o Toolbox abre um resolvedor com REGISTRO 1 e REGISTRO 2 lado a lado, compara BLOBs/Fotos por SHA-256 quando a engine suporta, permite escolher explicitamente qual ocorrência manter, abrir a comparação exportada ou preservar ambos e cancelar. Após a escolha, a recuperação continua automaticamente.
-- Depois do saneamento, todos os índices são reconstruídos, um novo backup é criado e o restore de teste completo é repetido.
+- Depois de cada decisão, o Toolbox tenta reativar os índices individualmente. Se a ativação revelar OUTRA chave duplicada, o resolvedor abre novamente e o processo continua em loop, sem abandonar a recuperação após o primeiro conflito.
+- Se não houver nova duplicidade detectável, mas algum índice/PRIMARY KEY continuar inativo, no Firebird 3.0+ o Toolbox usa um fallback de reconstrução limpa: cria uma base sem os dados daquela relação, restaura os metadados com índices inativos, copia todos os registros por leitura NATURAL para a estrutura nova, reativa triggers e índices, confere a contagem e gera um novo backup.
+- Depois do saneamento/reconstrução, um novo backup é criado e o restore de teste completo é repetido.
 - Depois da restauração final, executa pós-recuperação: acesso SQL, sweep final, gfix -validate -full, transações em limbo, índices/PRIMARY KEY/UNIQUE inativos, header e contagens essenciais. Um banco com gate crítico reprovado NÃO é marcado como apto para produção.
 
 Somente restaurar
@@ -6318,9 +7218,9 @@ func addCombo(id int, items []string, x, y, w int32, selected int) syscall.Handl
 
 func buildArchLabel() string {
 	if runtime.GOARCH == "386" {
-		return "Windows x86"
+		return "Windows x86/x64"
 	}
-	return "Windows x64"
+	return "Windows x64 (dev)"
 }
 
 func buildUI() {
@@ -6377,7 +7277,7 @@ func buildUI() {
 	createControl(WS_EX_CLIENTEDGE, "EDIT", "masterkey", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL|ES_PASSWORD, 582, 443, 166, 26, idPassword)
 	createIconButton(idPasswordToggle, "Mostrar senha", 760, 442, 124, 28)
 
-	createControl(0, "BUTTON", "", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 16, 510, 888, 178, 0)
+	createControl(0, "BUTTON", "", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 16, 510, 888, 204, 0)
 	addSectionHeader(idSectionExecute, "play", "4. Executar", 30, 516)
 	createIconButton(idExecute, "Executar", 30, 544, 118, 32)
 	createIconButton(idStop, "Parar", 158, 544, 88, 32)
@@ -6398,20 +7298,23 @@ func buildUI() {
 	progress := createControl(0, "msctls_progress32", "", WS_CHILD|WS_VISIBLE|PBS_SMOOTH, 102, 641, uiProgressBarWidth, 18, idProgress)
 	procSendMessageW.Call(uintptr(progress), PBM_SETRANGE32, 0, 100)
 
-	createControl(0, "STATIC", "Resultado:", WS_CHILD|WS_VISIBLE, 30, 666, 70, 20, 3023)
-	createControl(0, "STATIC", "Aguardando execução", WS_CHILD|WS_VISIBLE, 102, 666, 780, 20, idResult)
+	createControl(0, "STATIC", "Tempo decorrido:", WS_CHILD|WS_VISIBLE, 30, 666, 105, 20, 3024)
+	createControl(0, "STATIC", formatElapsedDuration(0), WS_CHILD|WS_VISIBLE, 138, 666, uiElapsedTextWidth, 20, idElapsed)
 
-	createControl(0, "BUTTON", "", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 16, 696, 888, 170, 0)
-	addSectionHeader(idSectionLog, "terminal", "Log de execução", 30, 702)
-	createIconButton(idDetailedLog, "Detalhado: não", 536, 702, 116, 28)
-	createIconButton(idClearLog, "Limpar", 662, 702, 102, 28)
-	createIconButton(idCopyLog, "Copiar", 774, 702, 110, 28)
-	createControl(0, "EDIT", "", WS_CHILD|WS_VISIBLE|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY|WS_VSCROLL|WS_BORDER, 28, 736, 864, uiLogEditHeight, idLog)
+	createControl(0, "STATIC", "Resultado:", WS_CHILD|WS_VISIBLE, 30, 690, 70, 20, 3023)
+	createControl(0, "STATIC", "Aguardando execução", WS_CHILD|WS_VISIBLE, 102, 690, 780, 20, idResult)
+
+	createControl(0, "BUTTON", "", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 16, 720, 888, 170, 0)
+	addSectionHeader(idSectionLog, "terminal", "Log de execução", 30, 726)
+	createIconButton(idDetailedLog, "Detalhado: não", 536, 726, 116, 28)
+	createIconButton(idClearLog, "Limpar", 662, 726, 102, 28)
+	createIconButton(idCopyLog, "Copiar", 774, 726, 110, 28)
+	createControl(0, "EDIT", "", WS_CHILD|WS_VISIBLE|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY|WS_VSCROLL|WS_BORDER, 28, 760, 864, uiLogEditHeight, idLog)
 	setControlFont(idLog, monoFont)
 
-	createControl(0, "STATIC", "Status:", WS_CHILD|WS_VISIBLE, 22, 875, 45, 20, 3012)
-	createControl(0, "STATIC", "Pronto. Selecione a rotina, os arquivos e clique em Executar.", WS_CHILD|WS_VISIBLE, 70, 875, 500, 20, idStatus)
-	createControl(0, "STATIC", appCredit, WS_CHILD|WS_VISIBLE, 590, 875, 300, 20, 3013)
+	createControl(0, "STATIC", "Status:", WS_CHILD|WS_VISIBLE, 22, 899, 45, 20, 3012)
+	createControl(0, "STATIC", "Pronto. Selecione a rotina, os arquivos e clique em Executar.", WS_CHILD|WS_VISIBLE, 70, 899, 500, 20, idStatus)
+	createControl(0, "STATIC", appCredit, WS_CHILD|WS_VISIBLE, 590, 899, 300, 20, 3013)
 
 	setText(idFbSource, detectFirebird("5.0"))
 	setText(idFbTarget, detectFirebird("5.0"))
@@ -6506,7 +7409,7 @@ func main() {
 		uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(u16("Firebird Toolbox"))),
 		WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_VISIBLE,
-		120, 40, 930, 942,
+		120, 40, 930, 966,
 		0, 0, hinst, 0,
 	)
 	if hwnd == 0 {

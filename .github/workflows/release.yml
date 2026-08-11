@@ -85,7 +85,7 @@ jobs:
         shell: pwsh
         run: ./tools/prepare-resources.ps1 -Version '${{ steps.version.outputs.version }}'
 
-      - name: Build release x64 and x86
+      - name: Build single Windows x86/x64 release
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
@@ -93,19 +93,16 @@ jobs:
           $tag = '${{ github.ref_name }}'
           $ld = "-H=windowsgui -X main.appVersion=$version"
 
+          # Um unico PE32/x86 e distribuido: roda em Windows x86 e, via WOW64,
+          # em Windows x64. O Toolbox apenas inicia os utilitarios Firebird
+          # externos, portanto pode controlar instalacoes Firebird x86 ou x64.
           $env:GOOS = 'windows'
-          $env:GOARCH = 'amd64'
-          $goArgs = @('build', '-trimpath', '-buildvcs=false', '-ldflags', $ld, '-o', "dist/FirebirdToolbox_$tag.exe", '.')
-          & go @goArgs
-          if ($LASTEXITCODE -ne 0) { throw "go build x64 falhou com codigo $LASTEXITCODE." }
-
           $env:GOARCH = '386'
-          $goArgs = @('build', '-trimpath', '-buildvcs=false', '-ldflags', $ld, '-o', "dist/FirebirdToolbox_${tag}_x86.exe", '.')
+          $goArgs = @('build', '-trimpath', '-buildvcs=false', '-ldflags', $ld, '-o', "dist/FirebirdToolbox_${tag}_x86_x64.exe", '.')
           & go @goArgs
-          if ($LASTEXITCODE -ne 0) { throw "go build x86 falhou com codigo $LASTEXITCODE." }
+          if ($LASTEXITCODE -ne 0) { throw "go build x86/x64 falhou com codigo $LASTEXITCODE." }
 
-          ./tools/verify-windows-build.ps1 -Path "dist/FirebirdToolbox_$tag.exe" -Version $version
-          ./tools/verify-windows-build.ps1 -Path "dist/FirebirdToolbox_${tag}_x86.exe" -Version $version
+          ./tools/verify-windows-build.ps1 -Path "dist/FirebirdToolbox_${tag}_x86_x64.exe" -Version $version
 
       - name: Azure login with OIDC
         uses: azure/login@v3
@@ -121,8 +118,7 @@ jobs:
           signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT_NAME }}
           certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
           files: |
-            ${{ github.workspace }}\dist\FirebirdToolbox_${{ github.ref_name }}.exe
-            ${{ github.workspace }}\dist\FirebirdToolbox_${{ github.ref_name }}_x86.exe
+            ${{ github.workspace }}\dist\FirebirdToolbox_${{ github.ref_name }}_x86_x64.exe
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
@@ -135,7 +131,7 @@ jobs:
         run: |
           $tag = '${{ github.ref_name }}'
           $version = '${{ steps.version.outputs.version }}'
-          $files = @("dist/FirebirdToolbox_$tag.exe", "dist/FirebirdToolbox_${tag}_x86.exe")
+          $files = @("dist/FirebirdToolbox_${tag}_x86_x64.exe")
           foreach ($file in $files) {
             ./tools/verify-windows-build.ps1 -Path $file -Version $version -RequireSignature -RequireTimestamp
           }
@@ -155,8 +151,7 @@ jobs:
         run: |
           $tag = '${{ github.ref_name }}'
           ./tools/defender-preflight.ps1 -Path @(
-            "dist/FirebirdToolbox_$tag.exe",
-            "dist/FirebirdToolbox_${tag}_x86.exe"
+            "dist/FirebirdToolbox_${tag}_x86_x64.exe"
           )
 
       - name: Package and hash release
@@ -165,8 +160,7 @@ jobs:
           $tag = '${{ github.ref_name }}'
           $bundle = 'dist/bundle'
           New-Item -ItemType Directory -Path $bundle -Force | Out-Null
-          Copy-Item "dist/FirebirdToolbox_$tag.exe" $bundle
-          Copy-Item "dist/FirebirdToolbox_${tag}_x86.exe" $bundle
+          Copy-Item "dist/FirebirdToolbox_${tag}_x86_x64.exe" $bundle
           Copy-Item "dist/SIGNATURE_STATUS.txt" $bundle
           Copy-Item README.md, CHANGELOG.md, LEIA-ME.md, LICENSE, SECURITY.md $bundle
           Compress-Archive -Path "$bundle/*" -DestinationPath "dist/FirebirdToolbox_${tag}_completo.zip" -Force
@@ -180,15 +174,10 @@ jobs:
               "$hash  $($_.Name)"
             } | Set-Content -Encoding ASCII "dist/FirebirdToolbox_${tag}_SHA256.txt"
 
-      - name: Attest x64 executable provenance
+      - name: Attest universal executable provenance
         uses: actions/attest@v4
         with:
-          subject-path: dist/FirebirdToolbox_${{ github.ref_name }}.exe
-
-      - name: Attest x86 executable provenance
-        uses: actions/attest@v4
-        with:
-          subject-path: dist/FirebirdToolbox_${{ github.ref_name }}_x86.exe
+          subject-path: dist/FirebirdToolbox_${{ github.ref_name }}_x86_x64.exe
 
       - name: Attest release bundle provenance
         uses: actions/attest@v4
@@ -202,8 +191,7 @@ jobs:
         run: |
           $tag = '${{ github.ref_name }}'
           gh release create $tag `
-            "dist/FirebirdToolbox_$tag.exe" `
-            "dist/FirebirdToolbox_${tag}_x86.exe" `
+            "dist/FirebirdToolbox_${tag}_x86_x64.exe" `
             "dist/FirebirdToolbox_${tag}_completo.zip" `
             "dist/FirebirdToolbox_${tag}_SHA256.txt" `
             "dist/SIGNATURE_STATUS.txt" `

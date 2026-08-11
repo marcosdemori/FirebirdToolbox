@@ -2,7 +2,7 @@
 
 ## Objetivo da v1.2.12
 
-> **v1.2.14:** mantém integralmente a cadeia de distribuição e adiciona gates de saúde pós-recuperação na lógica do aplicativo. O resolvedor visual de conflitos introduzido na v1.2.14 permanece.
+> **v1.2.20:** unifica a distribuição em um único executável x86/x64 e torna a descoberta do Firebird portátil entre computadores. A lógica de recuperação avançada permanece.
 
 
 A v1.2.12 endurece o executável e a cadeia de distribuição em dois níveis:
@@ -21,7 +21,7 @@ Em **Propriedades > Detalhes** do EXE oficial:
 - Produto: `Firebird Toolbox`
 - Empresa/desenvolvedor: `Marcos De Mori Laiola`
 - Descrição: `Firebird Toolbox - manutenção e recuperação Firebird`
-- Versão atual: `1.2.14`
+- Versão atual: `1.2.20`
 - Copyright: `© 2026 Marcos De Mori Laiola. Todos os direitos reservados.`
 
 Os recursos são definidos em `winres/winres.json` e gerados por `go-winres v0.3.3`.
@@ -68,14 +68,14 @@ O endpoint deve corresponder à região da conta do Artifact Signing.
 2. bloqueia a Release se qualquer configuração do Artifact Signing estiver ausente;
 3. roda `gofmt`, `go vet` e `go test`;
 4. gera VersionInfo, manifesto e ícone nativos;
-5. compila x64 e x86;
+5. compila um único PE32/x86 para Windows x86/x64;
 6. autentica no Azure via OIDC (`azure/login`);
 7. assina os dois EXEs com `azure/artifact-signing-action`;
 8. aplica timestamp RFC3161 da Microsoft;
 9. exige `Get-AuthenticodeSignature` com status `Valid` e timestamp presente;
 10. executa um preflight com Microsoft Defender quando os cmdlets Defender estão disponíveis no runner;
 11. cria ZIP e SHA-256 somente depois da assinatura;
-12. gera atestações de proveniência do GitHub para x64, x86 e ZIP;
+12. gera atestações de proveniência do GitHub para o executável único e o ZIP;
 13. cria a GitHub Release.
 
 **Não existe fallback para Release sem assinatura.** Se o Artifact Signing não estiver configurado ou falhar, a Release falha e nenhum EXE é publicado.
@@ -85,7 +85,7 @@ O endpoint deve corresponder à região da conta do Artifact Signing.
 Build local sem assinatura é permitido apenas de forma explícita para desenvolvimento:
 
 ```powershell
-.\tools\build.ps1 -Version "1.2.14" -AllowUnsignedDev
+.\tools\build.ps1 -Version "1.2.20" -AllowUnsignedDev
 ```
 
 Os arquivos recebem `_UNSIGNED_DEV` no nome e `SIGNATURE_STATUS.txt` informa **NAO DISTRIBUIR**.
@@ -94,7 +94,7 @@ Para um build local assinado com um certificado PFX confiável:
 
 ```powershell
 .\tools\build.ps1 `
-  -Version "1.2.14" `
+  -Version "1.2.20" `
   -SigningPfx "C:\Certificados\codigo.pfx" `
   -SigningPassword "SENHA_DO_CERTIFICADO"
 ```
@@ -118,7 +118,7 @@ Os `.ico` continuam incorporados ao executável, mas não são mais gravados em 
 No PowerShell:
 
 ```powershell
-Get-AuthenticodeSignature ".\FirebirdToolbox_v1.2.14.exe" |
+Get-AuthenticodeSignature ".\FirebirdToolbox_v1.2.20_x86_x64.exe" |
   Format-List Status,StatusMessage,SignerCertificate,TimeStamperCertificate
 ```
 
@@ -127,13 +127,13 @@ A Release oficial deve mostrar `Status : Valid` e um certificado de timestamp.
 Confira também o SHA-256 publicado:
 
 ```powershell
-Get-FileHash ".\FirebirdToolbox_v1.2.14.exe" -Algorithm SHA256
+Get-FileHash ".\FirebirdToolbox_v1.2.20_x86_x64.exe" -Algorithm SHA256
 ```
 
 E, para repositório público, a proveniência do GitHub pode ser verificada com:
 
 ```powershell
-gh attestation verify .\FirebirdToolbox_v1.2.14.exe -R marcosdemori/FirebirdToolbox
+gh attestation verify .\FirebirdToolbox_v1.2.20_x86_x64.exe -R marcosdemori/FirebirdToolbox
 ```
 
 ## Quando o Defender ainda detectar um build oficial assinado

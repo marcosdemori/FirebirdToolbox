@@ -1,11 +1,11 @@
-# Firebird Toolbox v1.2.14
+# Firebird Toolbox v1.2.20
 
 > Para a visão geral do repositório, build e publicação no GitHub, consulte [README.md](README.md).
 
 
-Utilitário portátil para Windows (x64 e x86) para manutenção, recuperação e restauração de bancos Firebird **1.0, 1.5, 2.0, 2.1, 2.5, 3.0, 4.0 e 5.0**.
+Utilitário portátil para Windows com um único executável x86/x64 para manutenção, recuperação e restauração de bancos Firebird **1.0, 1.5, 2.0, 2.1, 2.5, 3.0, 4.0 e 5.0**.
 
-A v1.2.14 mantém somente três rotinas na interface:
+A v1.2.20 mantém somente três rotinas e unifica a distribuição em um único executável x86/x64, com descoberta automática da instalação/serviço/porta na máquina onde estiver rodando:
 
 1. `Corrigir banco`
 2. `Corrigir banco (avançado)`
@@ -15,9 +15,9 @@ A v1.2.14 mantém somente três rotinas na interface:
 
 
 
-## Pós-recuperação e liberação para produção — v1.2.14
+## Conflitos iterativos e reconstrução limpa — v1.2.15
 
-A partir da v1.2.14, um restore final bem-sucedido não é suficiente para o Toolbox declarar a recuperação encerrada. O modo avançado executa gates de saúde no banco restaurado:
+A v1.2.15 deixa de encerrar o saneamento após a primeira duplicidade. A reconstrução dos índices é testada individualmente; se surgir outra chave duplicada, o resolvedor abre novamente. Se não houver nova duplicidade e ainda assim uma relação permanecer com PK/UNIQUE inativa, o Firebird 3.0+ recebe um fallback de reconstrução limpa da relação. Depois disso, continuam obrigatórios os gates de saúde no banco restaurado:
 
 - acesso SQL;
 - sweep final;
@@ -293,9 +293,21 @@ A porta pode ser detectada em `RemoteServicePort` do `firebird.conf`. O serviço
 - `-skip_data`, `-ignore`, `-limbo` e `-one_at_a_time` são recursos de resgate, não opções para uso rotineiro.
 - Um banco parcialmente restaurado não é considerado recuperado por completo.
 
+
+### Detecção portátil do Firebird
+
+O Toolbox **não usa os nomes de serviço gravados nos BATs**. Os BATs estão incorporados somente como referência histórica. Em cada computador, a aplicação procura a instalação local nesta ordem:
+
+1. `HKLM\SOFTWARE\Firebird Project\Firebird Server\Instances` nas visões 64 e 32 bits do Registry;
+2. `ProgramW6432`, `Program Files` e `Program Files (x86)`;
+3. `gbak.exe` disponível no `PATH`;
+4. como fallback, `ImagePath` dos serviços Windows, inclusive serviços com nome personalizado.
+
+A versão encontrada é confirmada pelo próprio `gbak -z`. A porta é lida de `RemoteServicePort` no `firebird.conf`; se não houver configuração explícita, usa o padrão oficial **3050**. O nome do serviço é apenas detectado para diagnóstico: as operações são feitas contra a instalação e a porta encontradas, sem depender de `Firebird5.0`, `Firebird3.0`, `FirebirdServerDefaultInstance` ou qualquer nome específico do computador de desenvolvimento.
+
 ## Requisitos
 
-- Windows x64 (recomendado) ou x86/32-bit para ambientes antigos.
+- Um único executável `x86_x64`: roda em Windows x86 e em Windows x64 via WOW64.
 - Instalação da versão Firebird utilizada em cada etapa.
 - Permissão do serviço Firebird para acessar a origem, a cópia de trabalho e a pasta de recuperação.
 
@@ -304,7 +316,7 @@ A porta pode ser detectada em `RemoteServicePort` do `firebird.conf`. O serviço
 A distribuição oficial é gerada pelo GitHub Actions e exige Microsoft Artifact Signing. Para um build local **somente de desenvolvimento**:
 
 ```powershell
-.\tools\build.ps1 -Version '1.2.14' -AllowUnsignedDev
+.\tools\build.ps1 -Version '1.2.20' -AllowUnsignedDev
 ```
 
 Os arquivos locais sem assinatura recebem `_UNSIGNED_DEV` no nome e não devem ser distribuídos.
@@ -313,7 +325,7 @@ Para um build local com PFX confiável:
 
 ```powershell
 .\tools\build.ps1 `
-  -Version '1.2.14' `
+  -Version '1.2.20' `
   -SigningPfx 'C:\Certificados\codigo.pfx' `
   -SigningPassword 'SENHA'
 ```

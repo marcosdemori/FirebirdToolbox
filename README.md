@@ -2,9 +2,9 @@
 
 Utilitário portátil para Windows destinado à **manutenção, correção, recuperação e restauração de bancos Firebird 1.0 a 5.0**.
 
-**Versão atual:** 1.2.14
+**Versão atual:** 1.2.20
 
-A v1.2.14 adiciona **gates automáticos de pós-recuperação**: depois do restore final, o Toolbox confere acesso SQL, sweep, validação estrutural, transações em limbo, índices/PRIMARY KEY/UNIQUE inativos, header transacional e contagens das relações envolvidas. Só uma recuperação completa que passa em todos os gates recebe o estado `APTO PARA PRODUÇÃO`. O resolvedor visual de conflitos da v1.2.13 permanece integralmente.
+A v1.2.20 passa a distribuir **um único executável Windows x86/x64**. O binário é PE32/x86 e funciona em Windows 32-bit e em Windows 64-bit via WOW64. A descoberta do Firebird deixa de depender de caminhos, portas ou nomes de serviço usados na máquina de desenvolvimento: o Toolbox consulta o Registry oficial do Firebird, Program Files/ProgramW6432, serviços Windows e PATH, confirma a versão pelo `gbak -z` e lê `RemoteServicePort` do `firebird.conf` da instalação encontrada. Os BATs incorporados são apenas referência histórica e não fornecem o nome do serviço usado pela execução.
 
 **Projeto feito por Marcos De Mori Laiola**
 
@@ -20,11 +20,12 @@ A v1.2.14 adiciona **gates automáticos de pós-recuperação**: depois do resto
 - log integrado resumido ou detalhado;
 - diagnóstico com `gfix`, backup/restore com `gbak` e conferência com `gstat`;
 - cópia de trabalho e relatório de recuperação em rotinas avançadas;
-- tratamento de corrupção de índices, páginas e conflitos de chave;
+- tratamento de corrupção de índices, páginas e conflitos de chave, inclusive múltiplas duplicidades em sequência;
 - tentativa de resgate de registros antes de excluir uma relação inteira;
+- fallback de reconstrução limpa de relação no Firebird 3.0+ quando uma PK/UNIQUE continua inativa sem nova duplicidade detectável;
 - restore de teste antes de considerar um backup recuperado como válido;
 - pós-recuperação com `RELATORIO_SAUDE_PERFORMANCE.txt` e gate explícito `APTO PARA PRODUÇÃO`;
-- executáveis Windows x64 e x86.
+- um único executável Windows x86/x64;
 
 > **Importante:** recuperação de banco corrompido nunca deve ser executada sobre o único arquivo disponível. Preserve cópias externas antes de iniciar qualquer procedimento.
 
@@ -32,10 +33,7 @@ A v1.2.14 adiciona **gates automáticos de pós-recuperação**: depois do resto
 
 Os executáveis compilados devem ser disponibilizados na seção **Releases** deste repositório.
 
-Ao criar uma tag no formato `v1.2.14`, por exemplo, o workflow de release compila automaticamente:
-
-- Windows x64;
-- Windows x86 / 32-bit;
+Ao criar uma tag no formato `v1.2.20`, o workflow de release compila automaticamente um único `FirebirdToolbox_v1.2.20_x86_x64.exe`, compatível com Windows x86 e x64.
 - arquivo SHA-256;
 - assinatura Authenticode obrigatória via Microsoft Artifact Signing;
 - timestamp RFC3161;
@@ -72,20 +70,18 @@ Restaura um backup Firebird para o destino selecionado sem executar a etapa de c
 Para teste local sem assinatura, é necessário assumir explicitamente que o binário é apenas de desenvolvimento:
 
 ```powershell
-.\tools\build.ps1 -Version "1.2.14" -AllowUnsignedDev
+.\tools\build.ps1 -Version "1.2.20" -AllowUnsignedDev
 ```
 
 O arquivo recebe `_UNSIGNED_DEV` no nome. Para distribuição pública use a Release oficial assinada.
 
-Para compilar somente x64:
+Para compilar manualmente o executável único x86/x64:
 
 ```powershell
 $env:GOOS = "windows"
-$env:GOARCH = "amd64"
-.\tools\prepare-resources.ps1 -Version "1.2.14"
-$env:GOOS = "windows"
-$env:GOARCH = "amd64"
-go build -trimpath -buildvcs=false -ldflags="-H=windowsgui -X main.appVersion=1.2.14" -o FirebirdToolbox.exe .
+$env:GOARCH = "386"
+.\tools\prepare-resources.ps1 -Version "1.2.20"
+go build -trimpath -buildvcs=false -ldflags="-H=windowsgui -X main.appVersion=1.2.20" -o FirebirdToolbox_v1.2.20_x86_x64.exe .
 ```
 
 ## Publicar no GitHub
@@ -96,8 +92,8 @@ Consulte [GITHUB_UPLOAD.md](GITHUB_UPLOAD.md) ou execute `PUBLICAR_GITHUB.bat` p
 
 O projeto possui dois workflows:
 
-- **CI:** valida `gofmt`, executa `go vet`, testes e builds x64/x86 em push/PR para `main`;
-- **Release:** em tags `v*.*.*`, exige configuração do Microsoft Artifact Signing, compila x64/x86, assina e aplica timestamp, valida Authenticode, executa preflight do Defender quando disponível, calcula SHA-256, gera atestações e só então cria a GitHub Release.
+- **CI:** valida `gofmt`, testa compatibilidade x64/x86 e verifica o executável único x86/x64 em push/PR para `main`;
+- **Release:** em tags `v*.*.*`, exige configuração do Microsoft Artifact Signing, compila o executável único x86/x64, assina e aplica timestamp, valida Authenticode, executa preflight do Defender quando disponível, calcula SHA-256, gera atestação e só então cria a GitHub Release.
 
 A CI não envia artifacts intermediários, evitando consumo desnecessário de Actions Storage.
 
@@ -110,7 +106,7 @@ A CI não envia artifacts intermediários, evitando consumo desnecessário de Ac
 ├── docs/                   # documentação complementar
 ├── scripts/                # BATs originais de referência
 ├── winres/                 # ícone, manifesto e VersionInfo do executável
-├── tools/build.ps1         # build local x64/x86
+├── tools/build.ps1         # build local único x86/x64
 ├── tools/sign-windows.ps1  # assinatura PFX apenas para build local
 ├── tools/defender-preflight.ps1 # preflight Defender da Release
 ├── PUBLICAR_GITHUB.bat     # publicacao guiada opcional
