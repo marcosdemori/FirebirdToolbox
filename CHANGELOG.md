@@ -1,4 +1,67 @@
+## 1.2.31 - 2026-08-11
+
+- Corrige definitivamente a linha superior dos blocos: a moldura do `BS_GROUPBOX` é elevada 8 px e sua altura cresce na mesma medida, preservando a borda inferior e deixando o traço superior contínuo acima do título.
+- Mantém ícone e texto dos cabeçalhos dentro do bloco, sem precisar apagar a linha com uma faixa branca.
+- Adiciona regressão de layout para limitar o deslocamento da borda e evitar nova sobreposição em ajustes futuros.
+- Sincroniza o workflow de CI, que ainda estava fixado em 1.2.29, com a versão atual 1.2.31.
+- Preserva integralmente rotinas, pré-validação, recuperação avançada, gates de saúde, ícone oficial e destaque dos atalhos de resultado da v1.2.30.
+
+## 1.2.30 - 2026-08-11
+
+- Dá destaque visual azul e texto semibold a `Abrir relatório` e `Localizar banco` somente quando esses resultados estão realmente disponíveis; desabilitados continuam discretos em cinza.
+- Força o repaint dos controles owner-draw ao habilitar/desabilitar para a mudança visual aparecer imediatamente após a execução.
+- Reduz a área branca dos cabeçalhos das seções ao tamanho necessário de cada título, fazendo o traço superior dos blocos continuar logo após o texto em vez de parecer cortado.
+- Preserva o layout em duas linhas, o ícone oficial da janela/barra de tarefas e toda a lógica Firebird da v1.2.29.
+
+## 1.2.29 - 2026-08-11
+
+- Corrige o ícone da janela aberta/barra de tarefas: a classe Win32 passa a receber `hIcon` e `hIconSm` antes da criação da janela.
+- O ícone é carregado prioritariamente do `RT_GROUP_ICON` principal (`#1`) incorporado no próprio executável, com fallback para o recurso interno da chama.
+- A janela principal passa a ser criada inicialmente oculta; o ícone e os controles são aplicados antes de `ShowWindow`, evitando que o Windows capture o estado sem ícone.
+- Aplica o mesmo ícone de classe também às janelas de Ajuda e resolução de conflitos.
+- Adiciona regressão para impedir que `WS_VISIBLE` volte ao `CreateWindowExW` principal antes da configuração do ícone.
+- Preserva integralmente layout, rotinas, pré-validação, recuperação avançada e gates de saúde da v1.2.28.
+
 # Changelog
+
+## 1.2.28 - 2026-08-11
+
+- Reorganiza a seção `4. Executar` em duas linhas sem aumentar a janela.
+- Mantém `Executar`, `Parar`, `Abrir pasta`, `Copiar caminho` e `Ajuda` na linha principal.
+- Move `Abrir relatório` e `Localizar banco` para a segunda linha, com largura suficiente para mostrar os textos completos.
+- Reequilibra o campo `Pular tabelas` para compartilhar a segunda linha sem sobreposição.
+- Adiciona gates de layout para impedir que os atalhos de resultado voltem a ser truncados ou ultrapassem a área útil.
+- Preserva integralmente a lógica de recuperação, pré-validação, gates de saúde e atalhos seguros da v1.2.27.
+
+## 1.2.27 - 2026-08-11
+
+- Simplifica o crédito do rodapé para `Feito por Marcos De Mori Laiola`.
+- Renomeia `Banco` para `Localizar banco`, deixando explícito que o botão abre o Windows Explorer e seleciona o banco final em vez de tentar abrir o arquivo Firebird.
+- Renomeia `Relatório` para `Abrir relatório` para manter os atalhos de resultado orientados à ação.
+- Faz `Localizar banco` apontar somente para um arquivo de destino realmente gerado/modificado na execução atual, evitando selecionar por engano um banco antigo que já existia no caminho informado.
+- Atualiza Ajuda, resumo final, status e checklist de DPI com a nova nomenclatura.
+- Preserva integralmente as rotinas, pré-validação, recuperação avançada, gates de saúde e recursos Windows da v1.2.26.
+
+## 1.2.26 - 2026-08-11
+
+- Renomeia a rotina normal para `Manutenção / conversão`, deixando explícito que ela é voltada a bancos saudáveis, manutenção preventiva, backup validado e migração entre versões.
+- Renomeia `Corrigir banco (avançado)` para `Recuperar banco corrompido`, reservando esse fluxo protegido para corrupção real, falhas de página/BLOB/índice e problemas de `gbak`.
+- Mantém compatibilidade com `preferences.json` gravado até a v1.2.25, migrando automaticamente os nomes antigos das rotinas para os novos.
+- Reforça a validação do build Windows para exigir `RT_GROUP_ICON` e `RT_MANIFEST`, impedindo que um executável seja distribuído novamente com o ícone genérico do Windows.
+- Corrige o executável de desenvolvimento entregue nesta versão para incorporar o ícone oficial de chama no recurso do próprio `.exe`, além do manifesto Windows.
+- Preserva a pré-validação, progresso por fases, preferências seguras, recuperação avançada e gates de saúde da v1.2.25.
+
+## 1.2.25 - 2026-08-11
+
+- Adiciona pré-validação antes da execução: origem, versão real do `gbak`, disponibilidade da porta Firebird, permissão de escrita e espaço livre são conferidos antes de iniciar uma rotina longa.
+- Bloqueia antecipadamente destino sem pasta gravável, versão Firebird incompatível e espaço livre claramente insuficiente.
+- Exibe o andamento por fases (`Fase X/Y`) sem alterar os percentuais internos já usados pelas rotinas.
+- Torna o cancelamento explícito: o status informa que o Toolbox está aguardando o encerramento seguro de `gbak`/`gfix`.
+- Acrescenta botões `Relatório` e `Banco` ao lado das ações principais; `Banco` apenas localiza o arquivo no Explorer, evitando abrir o banco por associação acidental.
+- Reorganiza a confirmação final em um resumo operacional com banco original preservado, backup, destino, relatório, ODS/dialeto, estado e tempo total quando aplicável.
+- Persiste somente preferências não sensíveis em `%APPDATA%\FirebirdToolbox\preferences.json`: rotina, versões e caminhos. A senha não é salva.
+- Adiciona checklist de validação de DPI/escala para 100%, 125%, 150% e 175% e regressões estáticas de layout.
+- Preserva a lógica de recuperação, gates de saúde, Dialect 1 e correção visual da v1.2.24.
 
 ## 1.2.24 - 2026-08-11
 

@@ -1,0 +1,1 @@
+fix(ui): manter divisorias acima dos titulos v1.2.31

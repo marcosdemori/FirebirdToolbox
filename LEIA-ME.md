@@ -1,6 +1,6 @@
-# Firebird Toolbox v1.2.24 — Ajuda rápida
+# Firebird Toolbox v1.2.31 — Ajuda rápida
 
-A v1.2.24 usa **um único executável x86/x64**, detecta o Firebird da própria máquina pelo Registry, Program Files/ProgramW6432, serviços e PATH, preserva o `Abrir pasta` pelo shell nativo do Windows e corrige a repintura dos rótulos da interface para manter fundo branco limpo sem textos duplicados. A porta vem de `RemoteServicePort` no `firebird.conf` e o fallback é 3050. Os nomes de serviço existentes nos BATs não são usados pela execução.
+A v1.2.31 usa **um único executável x86/x64**, mantém os atalhos de resultado organizados em duas linhas, mantém o traço superior dos blocos contínuo acima dos títulos e aplica o ícone oficial também à janela/barra de tarefas antes de exibir o programa, além de preservar as rotinas orientadas ao uso: `Manutenção / conversão` para banco saudável e migração, `Recuperar banco corrompido` para corrupção real e `Somente restaurar` para restore direto. Mantém a pré-validação antes de executar: confere arquivo, ferramenta/versão, porta, permissão de escrita e espaço livre. O progresso passa a indicar fases, o cancelamento aguarda encerramento seguro e os resultados podem ser abertos pelos botões Localizar banco, Abrir relatório e Abrir pasta. Caminhos e escolhas não sensíveis são lembrados; a senha nunca é salva. A porta vem de `RemoteServicePort` no `firebird.conf` e o fallback é 3050. Os nomes de serviço existentes nos BATs não são usados pela execução.
 
 
 
@@ -19,13 +19,13 @@ As correções visuais e de progresso das versões anteriores continuam preserva
 
 A interface possui somente:
 
-- `Corrigir banco`
-- `Corrigir banco (avançado)`
+- `Manutenção / conversão`
+- `Recuperar banco corrompido`
 - `Somente restaurar`
 
 ## Quando usar o modo avançado
 
-Use `Corrigir banco (avançado)` quando:
+Use `Recuperar banco corrompido` quando:
 
 - a aplicação informa banco corrompido;
 - a validação normal falha;

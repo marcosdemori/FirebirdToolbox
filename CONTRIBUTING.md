@@ -11,7 +11,7 @@ Este repositório usa Go e tem interface Win32 nativa. O código principal possu
 4. Compile o executável único de distribuição com `GOARCH=386` e valide-o como x86/x64.
 5. Não inclua bancos, backups, logs reais, senhas ou dados de clientes.
 6. Preserve as três rotinas principais da interface salvo mudança deliberada:
-   `Corrigir banco`, `Corrigir banco (avançado)` e `Somente restaurar`.
+   `Manutenção / conversão`, `Recuperar banco corrompido` e `Somente restaurar`.
 
 No Windows, você pode executar:
 

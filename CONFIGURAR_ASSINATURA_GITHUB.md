@@ -1,6 +1,6 @@
 # Checklist — assinatura oficial do Firebird Toolbox
 
-Antes de criar `v1.2.24`:
+Antes de criar `v1.2.31`:
 
 - [ ] Criar/validar conta Microsoft Artifact Signing no Azure.
 - [ ] Criar Certificate Profile de assinatura de código.
@@ -14,6 +14,6 @@ Antes de criar `v1.2.24`:
 - [ ] GitHub Variable `ARTIFACT_SIGNING_ACCOUNT_NAME`.
 - [ ] GitHub Variable `ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME`.
 - [ ] Push em `main` com CI verde.
-- [ ] Só então criar/push da tag `v1.2.24`.
+- [ ] Só então criar/push da tag `v1.2.31`.
 
 A Release falha antes de compilar se qualquer item de configuração estiver ausente.

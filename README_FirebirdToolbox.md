@@ -1,14 +1,14 @@
-# Firebird Toolbox v1.2.24
+# Firebird Toolbox v1.2.31
 
 > Para a visão geral do repositório, build e publicação no GitHub, consulte [README.md](README.md).
 
 
 Utilitário portátil para Windows com um único executável x86/x64 para manutenção, recuperação e restauração de bancos Firebird **1.0, 1.5, 2.0, 2.1, 2.5, 3.0, 4.0 e 5.0**.
 
-A v1.2.24 mantém somente três rotinas, o executável único x86/x64 e a descoberta automática da instalação/serviço/porta. Corrige a repintura dos textos da interface principal usando fundo branco sólido igual ao da janela, removendo blocos cinza sem deixar títulos, cabeçalhos ou estados anteriores sobrepostos. Preserva `Abrir pasta`, a Ajuda compacta, `Ver detalhes`/`Resumir log` e o destaque visual do resultado:
+A v1.2.31 mantém somente três rotinas, preserva a seção Executar em duas linhas e o ícone oficial da janela/barra de tarefas. Nesta revisão, `Abrir relatório` e `Localizar banco` recebem destaque visual apenas quando estão habilitados, e os cabeçalhos ficam totalmente abaixo da borda superior contínua dos blocos, eliminando a interrupção visual do traço: `Manutenção / conversão`, `Recuperar banco corrompido` e `Somente restaurar`. Também preserva a pré-validação operacional antes de iniciar gfix/gbak: arquivo, versão real das ferramentas, porta Firebird, permissão de escrita e espaço livre são conferidos antecipadamente. A execução mostra fases, o cancelamento informa que aguarda encerramento seguro, e ao final ficam disponíveis atalhos explícitos para Localizar banco, Abrir relatório e Abrir pasta. Preferências não sensíveis são restauradas entre sessões; senha não é gravada. O acabamento da v1.2.24 permanece:
 
-1. `Corrigir banco`
-2. `Corrigir banco (avançado)`
+1. `Manutenção / conversão`
+2. `Recuperar banco corrompido`
 3. `Somente restaurar`
 
 
@@ -111,7 +111,7 @@ Se o usuário autorizar manter uma ocorrência quando houver diferenças ou comp
 
 ## O que muda no modo avançado
 
-`Corrigir banco (avançado)` agora é um fluxo de recuperação protegido para bancos com corrupção mais séria. O princípio principal é: **diagnosticar o original e executar ações destrutivas somente em uma cópia de trabalho**.
+`Recuperar banco corrompido` agora é um fluxo de recuperação protegido para bancos com corrupção mais séria. O princípio principal é: **diagnosticar o original e executar ações destrutivas somente em uma cópia de trabalho**.
 
 Fluxo:
 
@@ -247,15 +247,15 @@ O relatório registra, sem armazenar a senha:
 
 ## Rotina normal
 
-`Corrigir banco` continua sendo o fluxo simples para bancos sem corrupção grave:
+`Manutenção / conversão` continua sendo o fluxo simples para bancos sem corrupção grave:
 
 1. validação;
 2. sweep;
 3. backup;
-4. restauração opcional na versão selecionada;
+4. conversão/restauração opcional na versão selecionada;
 5. conferência do banco restaurado.
 
-Se a validação detectar corrupção, o modo normal interrompe e orienta usar `Corrigir banco (avançado)`.
+Se a validação detectar corrupção, o modo normal interrompe e orienta usar `Recuperar banco corrompido`.
 
 ## Restauração entre versões
 
@@ -280,7 +280,7 @@ A porta pode ser detectada em `RemoteServicePort` do `firebird.conf`. O serviço
 - confirmação de sucesso com `OK`;
 - dialog de erro;
 - botão Parar;
-- Copiar caminho, Abrir pasta, Copiar log e Limpar log;
+- Copiar caminho, Abrir pasta, Localizar banco, Abrir relatório, Copiar log e Limpar log;
 - Mostrar/Ocultar senha;
 - campo `Pular tabelas (regex)` habilitado somente no modo avançado e em Firebird 3.0+.
 
@@ -316,7 +316,7 @@ A versão encontrada é confirmada pelo próprio `gbak -z`. A porta é lida de `
 A distribuição oficial é gerada pelo GitHub Actions e exige Microsoft Artifact Signing. Para um build local **somente de desenvolvimento**:
 
 ```powershell
-.\tools\build.ps1 -Version '1.2.24' -AllowUnsignedDev
+.\tools\build.ps1 -Version '1.2.31' -AllowUnsignedDev
 ```
 
 Os arquivos locais sem assinatura recebem `_UNSIGNED_DEV` no nome e não devem ser distribuídos.
@@ -325,7 +325,7 @@ Para um build local com PFX confiável:
 
 ```powershell
 .\tools\build.ps1 `
-  -Version '1.2.24' `
+  -Version '1.2.31' `
   -SigningPfx 'C:\Certificados\codigo.pfx' `
   -SigningPassword 'SENHA'
 ```

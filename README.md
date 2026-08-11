@@ -2,18 +2,18 @@
 
 Utilitário portátil para Windows destinado à **manutenção, correção, recuperação e restauração de bancos Firebird 1.0 a 5.0**.
 
-**Versão atual:** 1.2.24
+**Versão atual:** 1.2.31
 
-A v1.2.24 mantém **um único executável Windows x86/x64**, preserva a abertura nativa da pasta de resultado e corrige o acabamento da interface principal: textos estáticos usam o mesmo fundo branco da janela, sem blocos cinza e sem os rastros/duplicações que podiam aparecer durante o repaint. A Ajuda compacta, os rótulos de log e os estados visuais do resultado permanecem. O binário é PE32/x86 e funciona em Windows 32-bit e em Windows 64-bit via WOW64. A descoberta do Firebird deixa de depender de caminhos, portas ou nomes de serviço usados na máquina de desenvolvimento: o Toolbox consulta o Registry oficial do Firebird, Program Files/ProgramW6432, serviços Windows e PATH, confirma a versão pelo `gbak -z` e lê `RemoteServicePort` do `firebird.conf` da instalação encontrada. Os BATs incorporados são apenas referência histórica e não fornecem o nome do serviço usado pela execução.
+A v1.2.31 mantém **um único executável Windows x86/x64**, preserva o ícone oficial no arquivo/janela/barra de tarefas e refina o acabamento da interface: os atalhos `Abrir relatório` e `Localizar banco` ganham destaque quando ficam disponíveis, e corrige definitivamente os cabeçalhos: a borda superior dos blocos fica contínua acima do ícone e do título, sem ser apagada pela faixa branca do texto. A área de execução foi refinada para manter as ações principais na primeira linha e os atalhos de resultado em uma segunda linha, sem truncar os textos nem aumentar a janela. A interface também deixa os atalhos de resultado explícitos: `Abrir pasta` abre a pasta geral, `Abrir relatório` abre o relatório gerado e `Localizar banco` abre o Explorer selecionando somente o banco final produzido na execução. O rodapé usa a assinatura discreta `Feito por Marcos De Mori Laiola`. As rotinas continuam: `Manutenção / conversão` para bancos saudáveis e migração de versão, `Recuperar banco corrompido` para corrupção real e `Somente restaurar` para restore direto. Mantém a pré-validação antes da execução, progresso por fases, cancelamento seguro, resumo final objetivo e atalhos para Localizar banco/Abrir relatório/Abrir pasta. Caminhos e escolhas não sensíveis podem ser restaurados na próxima abertura; a senha nunca é persistida. O acabamento branco sem rastros da v1.2.24 permanece. O binário é PE32/x86 e funciona em Windows 32-bit e em Windows 64-bit via WOW64. A descoberta do Firebird deixa de depender de caminhos, portas ou nomes de serviço usados na máquina de desenvolvimento: o Toolbox consulta o Registry oficial do Firebird, Program Files/ProgramW6432, serviços Windows e PATH, confirma a versão pelo `gbak -z` e lê `RemoteServicePort` do `firebird.conf` da instalação encontrada. Os BATs incorporados são apenas referência histórica e não fornecem o nome do serviço usado pela execução.
 
-**Projeto feito por Marcos De Mori Laiola**
+**Feito por Marcos De Mori Laiola**
 
 ## Recursos principais
 
 - interface gráfica Win32 nativa e portátil;
 - suporte a Firebird 1.0, 1.5, 2.0, 2.1, 2.5, 3.0, 4.0 e 5.0;
-- `Corrigir banco`;
-- `Corrigir banco (avançado)` para cenários de corrupção;
+- `Manutenção / conversão`;
+- `Recuperar banco corrompido` para cenários de corrupção;
 - `Somente restaurar`;
 - seleção independente da versão de origem e da versão de restauração;
 - detecção de instalação, serviço e porta Firebird;
@@ -33,7 +33,7 @@ A v1.2.24 mantém **um único executável Windows x86/x64**, preserva a abertura
 
 Os executáveis compilados devem ser disponibilizados na seção **Releases** deste repositório.
 
-Ao criar uma tag no formato `v1.2.24`, o workflow de release compila automaticamente um único `FirebirdToolbox_v1.2.24_x86_x64.exe`, compatível com Windows x86 e x64.
+Ao criar uma tag no formato `v1.2.31`, o workflow de release compila automaticamente um único `FirebirdToolbox_v1.2.31_x86_x64.exe`, compatível com Windows x86 e x64.
 - arquivo SHA-256;
 - assinatura Authenticode obrigatória via Microsoft Artifact Signing;
 - timestamp RFC3161;
@@ -44,11 +44,11 @@ Os binários são anexados diretamente à GitHub Release e não ficam armazenado
 
 ## Rotinas
 
-### Corrigir banco
+### Manutenção / conversão
 
-Fluxo voltado à manutenção normal: validação, sweep, backup e, quando selecionado, restauração para a versão escolhida.
+Fluxo voltado a bancos sem corrupção estrutural: validação, sweep, backup e, quando selecionado, conversão/restauração para a versão escolhida.
 
-### Corrigir banco (avançado)
+### Recuperar banco corrompido
 
 Fluxo protegido para corrupção severa. Trabalha com cópia de recuperação, diagnóstico profundo, tentativa de preservação dos dados, restore de teste e relatório técnico.
 
@@ -70,7 +70,7 @@ Restaura um backup Firebird para o destino selecionado sem executar a etapa de c
 Para teste local sem assinatura, é necessário assumir explicitamente que o binário é apenas de desenvolvimento:
 
 ```powershell
-.\tools\build.ps1 -Version "1.2.24" -AllowUnsignedDev
+.\tools\build.ps1 -Version "1.2.31" -AllowUnsignedDev
 ```
 
 O arquivo recebe `_UNSIGNED_DEV` no nome. Para distribuição pública use a Release oficial assinada.
@@ -80,8 +80,8 @@ Para compilar manualmente o executável único x86/x64:
 ```powershell
 $env:GOOS = "windows"
 $env:GOARCH = "386"
-.\tools\prepare-resources.ps1 -Version "1.2.24"
-go build -trimpath -buildvcs=false -ldflags="-H=windowsgui -X main.appVersion=1.2.24" -o FirebirdToolbox_v1.2.24_x86_x64.exe .
+.\tools\prepare-resources.ps1 -Version "1.2.31"
+go build -trimpath -buildvcs=false -ldflags="-H=windowsgui -X main.appVersion=1.2.31" -o FirebirdToolbox_v1.2.31_x86_x64.exe .
 ```
 
 ## Publicar no GitHub

@@ -10,6 +10,7 @@ import (
 	"embed"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,11 +30,11 @@ import (
 	"unsafe"
 )
 
-var appVersion = "1.2.24"
-var appCredit = "Projeto feito por Marcos De Mori Laiola"
+var appVersion = "1.2.31"
+var appCredit = "Feito por Marcos De Mori Laiola"
 
 // Os BATs originais continuam incorporados como referencia/documentacao da logica
-// que originou o utilitario. A v1.2.24 executa gfix/gbak diretamente para manter
+// que originou o utilitario. A v1.2.31 executa gfix/gbak diretamente para manter
 // todo o log dentro da interface e permitir combinar versoes de origem/destino.
 //
 //go:embed scripts/*.bat LEIA-ME.md assets/*.ico
@@ -159,6 +160,7 @@ const (
 	TRANSPARENT     = 1
 	NULL_BRUSH      = 5
 	DI_NORMAL       = 0x0003
+	IMAGE_ICON      = 1
 )
 
 const (
@@ -197,6 +199,8 @@ const (
 	idResult         = 1033
 	idSkipData       = 1034
 	idElapsed        = 1035
+	idOpenReport     = 1036
+	idOpenDatabase   = 1037
 
 	idHelpCopy         = 4101
 	idHelpClose        = 4102
@@ -234,18 +238,22 @@ const (
 // Medidas centrais da interface. Mantê-las nomeadas evita regressões de
 // truncamento em rótulos e no texto de andamento.
 const (
-	uiFilesLabelWidth    int32 = 150
-	uiFilesFieldX        int32 = 182
-	uiFirebirdLabelWidth int32 = 160
-	uiFirebirdFieldX     int32 = 192
-	uiProgressTextWidth  int32 = 780
-	uiElapsedTextWidth   int32 = 744
-	uiProgressBarWidth   int32 = 780
-	uiSkipEditX          int32 = 190
-	uiSkipEditWidth      int32 = 382
-	uiSkipHintX          int32 = 584
-	uiSkipHintWidth      int32 = 300
-	uiLogEditHeight      int32 = 116
+	uiFilesLabelWidth     int32 = 150
+	uiFilesFieldX         int32 = 182
+	uiFirebirdLabelWidth  int32 = 160
+	uiFirebirdFieldX      int32 = 192
+	uiProgressTextWidth   int32 = 780
+	uiElapsedTextWidth    int32 = 744
+	uiProgressBarWidth    int32 = 780
+	uiSkipEditX           int32 = 190
+	uiSkipEditWidth       int32 = 360
+	uiOpenReportX         int32 = 560
+	uiOpenReportWidth     int32 = 150
+	uiLocateDatabaseX     int32 = 720
+	uiLocateDatabaseWidth int32 = 164
+	uiResultShortcutY     int32 = 582
+	uiLogEditHeight       int32 = 116
+	uiSectionBorderLift   int32 = 8
 
 	uiHelpWindowWidth   int32 = 850
 	uiHelpWindowHeight  int32 = 700
@@ -270,8 +278,8 @@ type routineDef struct {
 }
 
 var routines = []routineDef{
-	{"Corrigir banco", routineRepair, "Valida, executa sweep, gera backup e, se escolhido, restaura em outra versao."},
-	{"Corrigir banco (avançado)", routineRepairAdvanced, "Recuperação segura em cópia: diagnóstico profundo, mend opcional, backup de resgate, teste de restore e relatório."},
+	{"Manutenção / conversão", routineRepair, "Valida, executa sweep, gera backup e, se escolhido, converte/restaura em outra versão."},
+	{"Recuperar banco corrompido", routineRepairAdvanced, "Recuperação protegida em cópia para corrupção real: diagnóstico profundo, reparo controlado, backup de resgate, teste de restore e relatório."},
 	{"Somente restaurar", routineRestore, "Restaura um arquivo BAK/FBK/GBK diretamente na versao escolhida."},
 }
 
@@ -395,6 +403,7 @@ type buttonVisual struct {
 	Icon    string
 	Primary bool
 	Danger  bool
+	Accent  bool
 }
 
 var (
@@ -426,6 +435,7 @@ var (
 	procLoadCursorW              = user32.NewProc("LoadCursorW")
 	procDestroyIcon              = user32.NewProc("DestroyIcon")
 	procCreateIconFromResourceEx = user32.NewProc("CreateIconFromResourceEx")
+	procLoadImageW               = user32.NewProc("LoadImageW")
 	procDrawIconEx               = user32.NewProc("DrawIconEx")
 	procDrawTextW                = user32.NewProc("DrawTextW")
 	procDrawFocusRect            = user32.NewProc("DrawFocusRect")
@@ -444,6 +454,7 @@ var (
 	procDeleteObject             = gdi32.NewProc("DeleteObject")
 
 	procGetModuleHandleW     = kernel32.NewProc("GetModuleHandleW")
+	procGetDiskFreeSpaceExW  = kernel32.NewProc("GetDiskFreeSpaceExW")
 	procGetOEMCP             = kernel32.NewProc("GetOEMCP")
 	procMultiByteToWideChar  = kernel32.NewProc("MultiByteToWideChar")
 	procGetStockObject       = gdi32.NewProc("GetStockObject")
@@ -490,6 +501,8 @@ var (
 	resultBrushSuccess   syscall.Handle
 	resultBrushWarning   syscall.Handle
 	resultBrushError     syscall.Handle
+	appIconSmall         syscall.Handle
+	appIconBig           syscall.Handle
 
 	runMu         sync.Mutex
 	currentCancel context.CancelFunc
@@ -510,6 +523,7 @@ var (
 	lastHeader        databaseHeader
 	lastBackup        string
 	lastReport        string
+	lastDatabase      string
 	lastRecoveryState string
 
 	recoveryTechnicalLogMu sync.Mutex
@@ -535,6 +549,8 @@ var (
 		idOpenDest:       {Icon: "folder"},
 		idCopyPath:       {Icon: "copy"},
 		idHelp:           {Icon: "help"},
+		idOpenReport:     {Icon: "details", Accent: true},
+		idOpenDatabase:   {Icon: "database", Accent: true},
 		idDetailedLog:    {Icon: "details"},
 		idClearLog:       {Icon: "clear"},
 		idCopyLog:        {Icon: "copy"},
@@ -657,12 +673,40 @@ func addIcon(name string, x, y, size int32) syscall.Handle {
 	return hwnd
 }
 
+func sectionHeaderWidth(id int) int32 {
+	// O título permanece compacto para não criar uma faixa branca desnecessária
+	// dentro da seção. Desde a v1.2.31 a borda superior fica acima do cabeçalho,
+	// portanto estas larguras afetam apenas o acabamento do fundo do texto.
+	switch id {
+	case idSectionRoutine:
+		return 150
+	case idSectionFiles:
+		return 175
+	case idSectionFirebird:
+		return 235
+	case idSectionExecute:
+		return 110
+	case idSectionLog:
+		return 145
+	default:
+		return 180
+	}
+}
+
+func addSectionBox(x, y, w, h int32) syscall.Handle {
+	// O BS_GROUPBOX desenha a borda superior alguns pixels abaixo do Y informado.
+	// Subir somente a moldura (e aumentar a altura na mesma medida) mantém a borda
+	// inferior no lugar, mas deixa o traço superior completamente acima do título.
+	// Assim o cabeçalho não precisa apagar nenhum trecho da linha.
+	return createControl(0, "BUTTON", "", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, x, y-uiSectionBorderLift, w, h+uiSectionBorderLift, 0)
+}
+
 func addSectionHeader(id int, name, title string, x, y int32) {
-	// Mantem o cabeçalho dentro da seção, evitando que a borda superior do groupbox
-	// passe por cima do texto em alguns DPI/temas do Windows.
+	// O título agora fica integralmente dentro do bloco, abaixo da borda superior
+	// contínua. A largura curta serve apenas para manter o fundo restrito ao texto.
 	headerY := y + 4
 	addIcon(name, x, headerY+1, 18)
-	h := createControl(0, "STATIC", title, WS_CHILD|WS_VISIBLE, x+26, headerY, 320, 22, id)
+	h := createControl(0, "STATIC", title, WS_CHILD|WS_VISIBLE, x+26, headerY, sectionHeaderWidth(id), 22, id)
 	if sectionFont != 0 {
 		procSendMessageW.Call(uintptr(h), WM_SETFONT, uintptr(sectionFont), 1)
 	}
@@ -699,10 +743,19 @@ func drawOwnerButton(dis *drawItemStruct) bool {
 		bg = rgb(255, 247, 247)
 		border = rgb(252, 165, 165)
 		fg = rgb(185, 28, 28)
+	} else if visual.Accent {
+		// Atalhos de resultado ficam discretos enquanto indisponíveis e ganham
+		// destaque azul assim que existe um relatório/banco válido para abrir.
+		bg = rgb(239, 246, 255)
+		border = rgb(96, 165, 250)
+		fg = rgb(30, 64, 175)
 	}
 	if pressed {
 		if visual.Primary {
 			bg = rgb(29, 78, 216)
+		} else if visual.Accent {
+			bg = rgb(219, 234, 254)
+			border = rgb(59, 130, 246)
 		} else {
 			bg = rgb(226, 232, 240)
 		}
@@ -723,7 +776,7 @@ func drawOwnerButton(dis *drawItemStruct) bool {
 	procSetBkMode.Call(uintptr(dis.HDC), TRANSPARENT)
 	procSetTextColor.Call(uintptr(dis.HDC), fg)
 	buttonFont := guiFont
-	if visual.Primary && sectionFont != 0 {
+	if (visual.Primary || visual.Accent) && sectionFont != 0 {
 		buttonFont = sectionFont
 	}
 	oldFont, _, _ := procSelectObject.Call(uintptr(dis.HDC), uintptr(buttonFont))
@@ -791,16 +844,34 @@ func addSectionIcon(name string, x, y int32) {
 	liveIcons = append(liveIcons, icon)
 }
 
-func setAppIcons() {
-	small := loadUIIcon("flame", 16)
-	big := loadUIIcon("flame", 32)
-	if small != 0 {
-		procSendMessageW.Call(uintptr(mainHwnd), WM_SETICON, ICON_SMALL, uintptr(small))
-		liveIcons = append(liveIcons, small)
+func loadAppResourceIcon(hinst syscall.Handle, size int32) syscall.Handle {
+	// Carrega o mesmo RT_GROUP_ICON incorporado no executável. O go-winres grava
+	// o grupo principal como recurso numérico #1. Usar o recurso do próprio PE
+	// mantém Explorer, título da janela e barra de tarefas alinhados.
+	h, _, _ := procLoadImageW.Call(
+		uintptr(hinst),
+		uintptr(1), // MAKEINTRESOURCE(1)
+		IMAGE_ICON,
+		uintptr(size),
+		uintptr(size),
+		0,
+	)
+	if h != 0 {
+		return syscall.Handle(h)
 	}
-	if big != 0 {
-		procSendMessageW.Call(uintptr(mainHwnd), WM_SETICON, ICON_BIG, uintptr(big))
-		liveIcons = append(liveIcons, big)
+	// Fallback para builds de desenvolvimento sem recursos Windows preparados.
+	return loadUIIcon("flame", size)
+}
+
+func setAppIcons() {
+	if mainHwnd == 0 {
+		return
+	}
+	if appIconSmall != 0 {
+		procSendMessageW.Call(uintptr(mainHwnd), WM_SETICON, ICON_SMALL, uintptr(appIconSmall))
+	}
+	if appIconBig != 0 {
+		procSendMessageW.Call(uintptr(mainHwnd), WM_SETICON, ICON_BIG, uintptr(appIconBig))
 	}
 }
 
@@ -861,6 +932,9 @@ func enableControl(id int, enabled bool) {
 		value = 1
 	}
 	procEnableWindow.Call(uintptr(h), value)
+	// Força o redesenho dos botões owner-draw para que atalhos de resultado
+	// mudem imediatamente do estado cinza para o destaque quando habilitados.
+	procInvalidateRect.Call(uintptr(h), 0, 1)
 }
 
 func createControl(exStyle uint32, className, text string, style uint32, x, y, w, h int32, id int) syscall.Handle {
@@ -1790,6 +1864,54 @@ func copyTextToClipboard(text, successStatus string) bool {
 	return true
 }
 
+func progressPhaseText(percent int, text string) string {
+	if text == "" || !isRunning() {
+		return text
+	}
+	r := selectedRoutine()
+	target := selectedRestoreVersion()
+	phase, total := 1, 1
+	switch r.Kind {
+	case routineRepairAdvanced:
+		total = 6
+		switch {
+		case percent < 15:
+			phase = 1
+		case percent < 30:
+			phase = 2
+		case percent < 55:
+			phase = 3
+		case percent < 86:
+			phase = 4
+		case percent < 94:
+			phase = 5
+		default:
+			phase = 6
+		}
+	case routineRepair:
+		total = 3
+		if target != "" {
+			total = 4
+		}
+		switch {
+		case percent < 30:
+			phase = 1
+		case percent < 48:
+			phase = 2
+		case percent < 68 || target == "":
+			phase = 3
+		default:
+			phase = 4
+		}
+	case routineRestore:
+		total = 2
+		if percent >= 90 {
+			phase = 2
+		}
+	}
+	return fmt.Sprintf("Fase %d/%d • %s", phase, total, text)
+}
+
 func setProgress(percent int, text string) {
 	if percent < 0 {
 		percent = 0
@@ -1801,7 +1923,7 @@ func setProgress(percent int, text string) {
 		procSendMessageW.Call(uintptr(h), PBM_SETPOS, uintptr(percent), 0)
 	}
 	if text != "" {
-		setText(idProgressText, text)
+		setText(idProgressText, progressPhaseText(percent, text))
 	}
 }
 
@@ -1917,10 +2039,13 @@ func resetRunResult() {
 	lastHeader = databaseHeader{}
 	lastBackup = ""
 	lastReport = ""
+	lastDatabase = ""
 	lastRecoveryState = ""
 	resultMu.Unlock()
 	setText(idResult, "Aguardando execução")
 	setText(idElapsed, formatElapsedDuration(0))
+	enableControl(idOpenReport, false)
+	enableControl(idOpenDatabase, false)
 	setProgressState(PBST_NORMAL)
 	setProgress(0, "Preparando...")
 }
@@ -1941,6 +2066,41 @@ func setLastReport(path string) {
 	resultMu.Lock()
 	lastReport = path
 	resultMu.Unlock()
+	if fileExists(path) && !isRunning() {
+		enableControl(idOpenReport, true)
+	}
+}
+
+func setLastDatabase(path string) {
+	resultMu.Lock()
+	lastDatabase = path
+	resultMu.Unlock()
+}
+
+func lastDatabaseSnapshot() string {
+	resultMu.Lock()
+	defer resultMu.Unlock()
+	return lastDatabase
+}
+
+func fileGeneratedThisRun(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	timerMu.Lock()
+	started := runStartedAt
+	timerMu.Unlock()
+	if started.IsZero() {
+		return false
+	}
+	// Sistemas de arquivos do Windows podem arredondar timestamps; a pequena
+	// tolerância evita falso negativo sem aceitar um arquivo antigo qualquer.
+	return !info.ModTime().Before(started.Add(-2 * time.Second))
 }
 
 func setLastRecoveryState(state string) {
@@ -1964,46 +2124,59 @@ func runResultSnapshot() (databaseHeader, string, string) {
 func successSummary(c workflowConfig) (string, string) {
 	h, backup, report := runResultSnapshot()
 	recoveryState := recoveryStateSnapshot()
-	var lines []string
+	upperState := strings.ToUpper(recoveryState)
+	partial := strings.Contains(upperState, "PARCIAL")
 	compact := "✓ Concluído"
-	if strings.Contains(strings.ToUpper(recoveryState), "PARCIAL") {
-		lines = append(lines, "Recuperação parcial concluída.", "", "Rotina: "+c.Routine.Name)
+	if partial {
 		compact = "⚠ Recuperação parcial"
+	}
+	if c.TargetVersion != "" {
+		compact += " | FB " + c.TargetVersion
+	}
+	if h.ODS != "" {
+		compact += " | ODS " + h.ODS
+	}
+	if h.Dialect != "" {
+		compact += " | Dialeto " + h.Dialect
+	}
+
+	lines := []string{"RESUMO FINAL"}
+	if partial {
+		lines = append(lines, "⚠ Recuperação parcial concluída")
 	} else {
-		lines = append(lines, "Rotina concluída com sucesso.", "", "Rotina: "+c.Routine.Name)
+		lines = append(lines, "✓ Rotina concluída com sucesso")
+	}
+	lines = append(lines, "", "Rotina: "+c.Routine.Name)
+	if c.Routine.Kind == routineRepairAdvanced {
+		lines = append(lines, "✓ Banco original preservado")
+	}
+	if backup != "" && fileExists(backup) {
+		lines = append(lines, "✓ Backup criado e preservado")
+	}
+	if c.Dest != "" && fileExists(c.Dest) {
+		lines = append(lines, "✓ Banco de destino criado: "+c.Dest)
+	}
+	if report != "" && fileExists(report) {
+		lines = append(lines, "✓ Relatório disponível: "+report)
+	}
+	if h.ODS != "" || h.Dialect != "" {
+		validation := "✓ Resultado validado"
+		if h.ODS != "" {
+			validation += " | ODS " + h.ODS
+		}
+		if h.Dialect != "" {
+			validation += " | Dialeto " + h.Dialect
+		}
+		lines = append(lines, validation)
 	}
 	if recoveryState != "" {
 		lines = append(lines, "Estado: "+recoveryState)
 	}
-	if c.TargetVersion != "" {
-		lines = append(lines, "Firebird de destino: "+c.TargetVersion)
-		compact += " | FB " + c.TargetVersion
-	}
-	if c.Dest != "" && (c.TargetVersion != "" || c.Routine.Kind == routineRestore) {
-		lines = append(lines, "Arquivo gerado: "+c.Dest)
-	}
-	if backup != "" {
-		lines = append(lines, "Backup: "+backup)
-	}
-	if report != "" {
-		lines = append(lines, "Relatório: "+report)
-	}
-	if h.ODS != "" {
-		lines = append(lines, "ODS: "+h.ODS)
-		compact += " | ODS " + h.ODS
-	}
-	if h.Dialect != "" {
-		lines = append(lines, "Dialeto: "+h.Dialect)
-		compact += " | Dialeto " + h.Dialect
-	}
-	if h.PageSize != "" {
-		lines = append(lines, "Página: "+h.PageSize+" bytes")
-	}
 	lines = append(lines, "Tempo total: "+elapsedTextSnapshot())
-	if c.Routine.Kind == routineRepairAdvanced && strings.Contains(strings.ToUpper(recoveryState), "APTO PARA PRODUÇÃO") && c.Dest != "" {
-		lines = append(lines, "", "IMPORTANTE: o Toolbox não substitui automaticamente o banco usado pelo seu sistema.", "Confirme que a aplicação aponta para o arquivo gerado acima e não para o banco original corrompido.")
+	if c.Routine.Kind == routineRepairAdvanced && strings.Contains(upperState, "APTO PARA PRODUÇÃO") && c.Dest != "" {
+		lines = append(lines, "", "IMPORTANTE: o Toolbox não substitui automaticamente o banco usado pelo sistema.", "Confirme que a aplicação aponta para o banco de destino aprovado antes de reabrir o sistema.")
 	}
-	lines = append(lines, "", "Clique em OK para fechar esta confirmação.")
+	lines = append(lines, "", "Use os botões Localizar banco, Abrir relatório e Abrir pasta para acessar os resultados.")
 	return strings.Join(lines, "\n"), compact
 }
 
@@ -2435,6 +2608,303 @@ func validateConfig(c workflowConfig) error {
 		}
 	}
 	return nil
+}
+
+type appPreferences struct {
+	RoutineName   string `json:"routine_name"`
+	SourceVersion string `json:"source_version"`
+	TargetVersion string `json:"target_version"`
+	Source        string `json:"source"`
+	Dest          string `json:"dest"`
+	BackupDir     string `json:"backup_dir"`
+	FbSource      string `json:"fb_source"`
+	FbTarget      string `json:"fb_target"`
+	DetailedLog   bool   `json:"detailed_log"`
+}
+
+func preferencesPath() string {
+	base, err := os.UserConfigDir()
+	if err != nil || strings.TrimSpace(base) == "" {
+		base, _ = os.UserHomeDir()
+	}
+	if strings.TrimSpace(base) == "" {
+		return ""
+	}
+	return filepath.Join(base, "FirebirdToolbox", "preferences.json")
+}
+
+func savePreferences(c workflowConfig) {
+	path := preferencesPath()
+	if path == "" {
+		return
+	}
+	prefs := appPreferences{
+		RoutineName:   c.Routine.Name,
+		SourceVersion: c.SourceVersion,
+		TargetVersion: c.TargetVersion,
+		Source:        c.Source,
+		Dest:          c.Dest,
+		BackupDir:     c.BackupDir,
+		FbSource:      c.FbSource,
+		FbTarget:      c.FbTarget,
+		DetailedLog:   detailedLog,
+	}
+	data, err := json.MarshalIndent(prefs, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return
+	}
+	_ = os.WriteFile(path, data, 0600)
+}
+
+func loadPreferences() appPreferences {
+	path := preferencesPath()
+	if path == "" {
+		return appPreferences{}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return appPreferences{}
+	}
+	var prefs appPreferences
+	if json.Unmarshal(data, &prefs) != nil {
+		return appPreferences{}
+	}
+	return prefs
+}
+
+func preferenceComboIndex(items []string, value string) int {
+	for i, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item), strings.TrimSpace(value)) {
+			return i
+		}
+	}
+	return -1
+}
+
+func preferenceRoutineIndex(items []string, value string) int {
+	if idx := preferenceComboIndex(items, value); idx >= 0 {
+		return idx
+	}
+	// Compatibilidade com preferences.json gravado até a v1.2.25.
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case strings.ToLower("Corrigir banco"):
+		return 0
+	case strings.ToLower("Corrigir banco (avançado)"), strings.ToLower("Corrigir banco (avancado)"):
+		return 1
+	default:
+		return -1
+	}
+}
+
+func applySavedPreferences() {
+	prefs := loadPreferences()
+	if prefs.RoutineName == "" && prefs.Source == "" && prefs.BackupDir == "" {
+		return
+	}
+	if idx := preferenceRoutineIndex(routineNames(routines), prefs.RoutineName); idx >= 0 {
+		setCombo(idRoutine, idx)
+	}
+	if idx := preferenceComboIndex(versions, prefs.SourceVersion); idx >= 0 {
+		setCombo(idSourceVersion, idx)
+	}
+	if prefs.TargetVersion == "" {
+		setCombo(idRestoreVersion, 0)
+	} else if idx := preferenceComboIndex(restoreVersions, prefs.TargetVersion); idx >= 0 {
+		setCombo(idRestoreVersion, idx)
+	}
+
+	// Aplica primeiro as regras da rotina e depois restaura os caminhos escolhidos
+	// pelo operador. Assim a detecção automática continua sendo o fallback.
+	routineChanged()
+	if prefs.Source != "" && fileExists(prefs.Source) {
+		setText(idSource, prefs.Source)
+	}
+	if prefs.BackupDir != "" && dirExists(prefs.BackupDir) && selectedRoutine().Kind != routineRestore {
+		setText(idBackupDir, prefs.BackupDir)
+	}
+	if prefs.Dest != "" {
+		parent := filepath.Dir(prefs.Dest)
+		if parent != "." && dirExists(parent) {
+			setText(idDest, prefs.Dest)
+		}
+	}
+	if prefs.FbSource != "" && dirExists(prefs.FbSource) && selectedRoutine().Kind != routineRestore {
+		setText(idFbSource, prefs.FbSource)
+		setText(idSourcePort, detectFirebirdPort(prefs.FbSource, selectedSourceVersion()))
+	}
+	if prefs.FbTarget != "" && dirExists(prefs.FbTarget) && selectedRestoreVersion() != "" {
+		setText(idFbTarget, prefs.FbTarget)
+		setText(idTargetPort, detectFirebirdPort(prefs.FbTarget, selectedRestoreVersion()))
+	}
+	detailedLog = prefs.DetailedLog
+	if detailedLog {
+		setText(idDetailedLog, "Resumir log")
+	} else {
+		setText(idDetailedLog, "Ver detalhes")
+	}
+	updateUIState(false)
+}
+
+type preflightReport struct {
+	Checks   []string
+	Warnings []string
+}
+
+func (p preflightReport) text() string {
+	var lines []string
+	for _, item := range p.Checks {
+		lines = append(lines, "✓ "+item)
+	}
+	for _, item := range p.Warnings {
+		lines = append(lines, "⚠ "+item)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func humanBytes(value uint64) string {
+	const (
+		kb = uint64(1024)
+		mb = 1024 * kb
+		gb = 1024 * mb
+	)
+	switch {
+	case value >= gb:
+		return fmt.Sprintf("%.1f GB", float64(value)/float64(gb))
+	case value >= mb:
+		return fmt.Sprintf("%.0f MB", float64(value)/float64(mb))
+	case value >= kb:
+		return fmt.Sprintf("%.0f KB", float64(value)/float64(kb))
+	default:
+		return fmt.Sprintf("%d bytes", value)
+	}
+}
+
+func diskFreeBytes(dir string) (uint64, error) {
+	dir = filepath.Clean(strings.TrimSpace(dir))
+	if dir == "" || !dirExists(dir) {
+		return 0, errors.New("pasta inexistente")
+	}
+	var available, total, totalFree uint64
+	r, _, callErr := procGetDiskFreeSpaceExW.Call(
+		uintptr(unsafe.Pointer(u16(dir))),
+		uintptr(unsafe.Pointer(&available)),
+		uintptr(unsafe.Pointer(&total)),
+		uintptr(unsafe.Pointer(&totalFree)),
+	)
+	if r == 0 {
+		return 0, fmt.Errorf("GetDiskFreeSpaceExW falhou: %v", callErr)
+	}
+	return available, nil
+}
+
+func ensureWritableDir(dir string) error {
+	if !dirExists(dir) {
+		return errors.New("a pasta não existe")
+	}
+	f, err := os.CreateTemp(dir, ".firebird-toolbox-write-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(name)
+		return err
+	}
+	return os.Remove(name)
+}
+
+func checkToolVersion(label, root, selected string, report *preflightReport) error {
+	detected := probeFirebirdVersion(root)
+	if detected == "" {
+		report.Warnings = append(report.Warnings, label+": não foi possível confirmar a versão pelo gbak -z; o caminho será validado novamente durante a execução")
+		return nil
+	}
+	if detected != selected {
+		return fmt.Errorf("%s aponta para Firebird %s, mas a rotina está configurada para Firebird %s", label, detected, selected)
+	}
+	report.Checks = append(report.Checks, label+": Firebird "+detected+" confirmado pelo gbak")
+	return nil
+}
+
+func checkEndpointPreflight(label, version, root, port string, report *preflightReport) error {
+	resolved := strings.TrimSpace(port)
+	if !portReachable(resolved) {
+		configured := detectFirebirdPort(root, version)
+		if configured != "" && portReachable(configured) {
+			resolved = configured
+			report.Warnings = append(report.Warnings, label+": porta informada não respondeu; a instalação respondeu na porta "+configured)
+		} else {
+			return fmt.Errorf("%s não está respondendo em 127.0.0.1:%s; inicie o serviço Firebird ou confira a porta", label, port)
+		}
+	}
+	report.Checks = append(report.Checks, label+": serviço acessível em 127.0.0.1:"+resolved)
+	return nil
+}
+
+func runPreflight(c workflowConfig) (preflightReport, error) {
+	var report preflightReport
+	info, err := os.Stat(c.Source)
+	if err != nil || info.IsDir() {
+		return report, errors.New("não foi possível ler o arquivo de origem")
+	}
+	report.Checks = append(report.Checks, "origem acessível ("+humanBytes(uint64(info.Size()))+")")
+
+	if c.Routine.Kind != routineRestore {
+		if err := checkToolVersion("Firebird da rotina", c.FbSource, c.SourceVersion, &report); err != nil {
+			return report, err
+		}
+		if err := checkEndpointPreflight("Firebird da rotina", c.SourceVersion, c.FbSource, c.SourcePort, &report); err != nil {
+			return report, err
+		}
+		if err := ensureWritableDir(c.BackupDir); err != nil {
+			return report, fmt.Errorf("a pasta de backup não permite gravação: %w", err)
+		}
+		report.Checks = append(report.Checks, "pasta de backup permite gravação")
+
+		required := uint64(info.Size()) + 256*1024*1024
+		if c.Routine.Kind == routineRepairAdvanced {
+			required = uint64(info.Size())*3 + 512*1024*1024
+		}
+		if free, err := diskFreeBytes(c.BackupDir); err == nil {
+			if free < required {
+				return report, fmt.Errorf("espaço livre insuficiente na pasta de backup: disponível %s, recomendado no mínimo %s", humanBytes(free), humanBytes(required))
+			}
+			report.Checks = append(report.Checks, "espaço livre para trabalho/backup: "+humanBytes(free))
+		} else {
+			report.Warnings = append(report.Warnings, "não foi possível medir o espaço livre da pasta de backup")
+		}
+	}
+
+	if c.TargetVersion != "" {
+		parent := filepath.Dir(c.Dest)
+		if parent == "." || !dirExists(parent) {
+			return report, errors.New("a pasta do arquivo de destino não existe")
+		}
+		if err := ensureWritableDir(parent); err != nil {
+			return report, fmt.Errorf("a pasta do destino não permite gravação: %w", err)
+		}
+		report.Checks = append(report.Checks, "pasta do destino permite gravação")
+		if fileExists(c.Dest) {
+			report.Warnings = append(report.Warnings, "o arquivo de destino já existe e exigirá confirmação antes da restauração")
+		}
+		if err := checkToolVersion("Firebird da restauração", c.FbTarget, c.TargetVersion, &report); err != nil {
+			return report, err
+		}
+		if err := checkEndpointPreflight("Firebird da restauração", c.TargetVersion, c.FbTarget, c.TargetPort, &report); err != nil {
+			return report, err
+		}
+		required := uint64(info.Size()) + 256*1024*1024
+		if free, err := diskFreeBytes(parent); err == nil {
+			if free < required {
+				return report, fmt.Errorf("espaço livre insuficiente no destino: disponível %s, recomendado no mínimo %s", humanBytes(free), humanBytes(required))
+			}
+			report.Checks = append(report.Checks, "espaço livre no destino: "+humanBytes(free))
+		}
+	}
+	return report, nil
 }
 
 func setStatus(text string) {
@@ -6565,7 +7035,7 @@ func runRepair(ctx context.Context, c workflowConfig, advanced bool) error {
 	validationOutput, validationErr := runRecoveryCapture(ctx, "Etapa 1: Validando banco...", gfix, "-user", c.User, "-pass", c.Password, "-v", "-full", dbConn)
 	validationStats := parseRecoveryStats(validationOutput)
 	if validationErr != nil || validationStats.HasCorruption() || toolOutputHasOperationalFailure(validationOutput) {
-		return fmt.Errorf("a validação encontrou problema; use 'Corrigir banco (avançado)' para diagnóstico seguro e recuperação")
+		return fmt.Errorf("a validação encontrou problema; use 'Recuperar banco corrompido' para diagnóstico seguro e recuperação")
 	}
 	appendLog("✓ Banco validado.")
 	setProgress(25, "Banco validado")
@@ -6627,6 +7097,19 @@ func executeWorkflow() {
 		return
 	}
 
+	setStatus("Pré-validando arquivos, Firebird, gravação e espaço em disco...")
+	setText(idResult, "Verificando pré-requisitos...")
+	preflight, preflightErr := runPreflight(c)
+	if preflightErr != nil {
+		setStatus("Pré-validação reprovada. Corrija o item informado antes de executar.")
+		setText(idResult, "⚠ Pré-validação reprovada")
+		messageBox("Pré-validação", "A rotina não foi iniciada.\n\n"+preflightErr.Error(), MB_OK|MB_ICONWARNING)
+		return
+	}
+	setText(idResult, "Aguardando execução")
+	setStatus("Pré-validação concluída. Pronto para confirmar a rotina.")
+	savePreferences(c)
+
 	if c.Routine.Kind == routineRepair || c.Routine.Kind == routineRepairAdvanced {
 		text := "Feche os sistemas conectados ao banco antes de continuar."
 		if c.Routine.Kind == routineRepairAdvanced {
@@ -6639,6 +7122,9 @@ func executeWorkflow() {
 		}
 		if c.Routine.Kind == routineRepairAdvanced && versionNumber(c.SourceVersion) >= 3.0 && normalizeSkipData(c.SkipData) != "" {
 			text += "\n\nATENÇÃO: o campo Pular tabelas está preenchido. Os dados das tabelas que corresponderem à regex NÃO entrarão no backup de recuperação."
+		}
+		if len(preflight.Warnings) > 0 {
+			text += "\n\nAvisos da pré-validação:\n- " + strings.Join(preflight.Warnings, "\n- ")
 		}
 		if messageBox("Confirmar rotina", text+"\n\nDeseja executar agora?", MB_YESNO|MB_ICONWARNING) != IDYES {
 			return
@@ -6659,6 +7145,8 @@ func executeWorkflow() {
 	startRunTimer()
 	appendLog("Iniciando rotina: " + c.Routine.Name)
 	appendLog("Cronômetro iniciado: " + time.Now().Format("15:04:05"))
+	appendLog("Pré-validação concluída antes da execução:")
+	appendLog(preflight.text())
 	if c.Routine.Kind != routineRestore {
 		appendLog("Firebird da rotina: " + c.SourceVersion + " | Porta: " + c.SourcePort)
 		appendLog("Instalação Firebird da rotina: " + c.FbSource)
@@ -6713,6 +7201,7 @@ func executeWorkflow() {
 			setStatus("Rotina interrompida.")
 			setText(idResult, "■ Interrompido")
 			setTerminalProgress(PBST_PAUSED, "Interrompido pelo usuário")
+			updateResultButtons()
 			return
 		}
 		if err != nil {
@@ -6743,6 +7232,7 @@ func executeWorkflow() {
 				setTerminalProgress(PBST_ERROR, "Encerrado com erro")
 				messageBox("Erro na rotina", failureSummary(err), MB_OK|MB_ICONERROR)
 			}
+			updateResultButtons()
 			return
 		}
 		elapsed := finishRunTimer()
@@ -6750,6 +7240,7 @@ func executeWorkflow() {
 		state := strings.ToUpper(recoveryStateSnapshot())
 		dialogText, compact := successSummary(c)
 		setText(idResult, compact)
+		updateResultButtons()
 		if strings.Contains(state, "PARCIAL") {
 			setTerminalProgress(PBST_PAUSED, "Recuperação parcial concluída")
 			appendLog("⚠ Recuperação parcial concluída. Consulte o relatório antes de usar o banco.")
@@ -6775,8 +7266,10 @@ func stopWorkflow() {
 	if messageBox("Interromper rotina", "Deseja interromper a rotina em execução?", MB_YESNO|MB_ICONWARNING) != IDYES {
 		return
 	}
-	appendLog("Solicitada interrupcao da rotina...")
-	setStatus("Interrompendo...")
+	appendLog("Cancelamento solicitado pelo usuário; aguardando encerramento seguro do processo Firebird...")
+	setStatus("Cancelamento solicitado — aguardando gbak/gfix encerrar com segurança...")
+	setText(idProgressText, "Cancelamento solicitado • aguardando encerramento seguro...")
+	setProgressState(PBST_PAUSED)
 	cancel()
 }
 
@@ -6795,14 +7288,21 @@ Ao clicar em Executar e confirmar a rotina, o campo Tempo decorrido começa em 0
 3) Se desejar restauração, escolha "Restaurar para".
 4) Selecione o banco de origem, o destino e a pasta de backup.
 5) Confira os caminhos do Firebird, as portas e as credenciais.
-6) Clique em Executar e acompanhe o progresso e o log.
+6) Clique em Executar. Antes de iniciar, o Toolbox confere arquivo, versão real do Firebird, porta, gravação e espaço livre.
+7) Acompanhe as fases, o progresso e o log. Ao final, use Localizar banco, Abrir relatório ou Abrir pasta conforme o resultado disponível.
+
+PRÉ-VALIDAÇÃO
+Antes de iniciar uma rotina longa, o Toolbox verifica se a origem existe, confirma a versão pelo gbak quando possível, testa a porta Firebird, testa gravação nas pastas e confere espaço livre. Se um requisito crítico falhar, a rotina não começa.
+
+PREFERÊNCIAS
+Rotina, versões e caminhos podem ser lembrados entre sessões em preferences.json dentro da pasta de configuração do usuário. A senha nunca é gravada.
 
 2. ROTINAS
-Corrigir banco
-- Valida o banco, executa sweep, gera backup e, quando selecionado, restaura em outra instância/versão.
-- É o modo recomendado para manutenção normal e bancos sem corrupção pesada.
+Manutenção / conversão
+- Valida o banco, executa sweep, gera backup e, quando selecionado, converte/restaura em outra instância/versão.
+- É o modo recomendado para manutenção preventiva, backup validado e migração entre versões quando o banco não apresenta corrupção estrutural.
 
-Corrigir banco (avançado)
+Recuperar banco corrompido
 - Indicado para corrupção real, erros de página, BLOB, índice ou falhas de gbak.
 - Começa com diagnóstico somente leitura quando a versão suporta esse recurso.
 - Cria uma cópia de trabalho antes de qualquer reparo destrutivo.
@@ -6891,6 +7391,11 @@ Falha do gbak em uma tabela
 - Se o erro for compatível com índice corrompido, tenta primeiro desativar índices não vinculados a constraints somente na cópia de trabalho e repete o backup sem excluir dados.
 - Se isso não resolver, em Firebird 3.0+ pode criar um backup-base com -skip_data e tentar recuperar os registros da tabela para um banco limpo.
 
+ATALHOS DE RESULTADO
+- Localizar banco: abre o Windows Explorer e seleciona somente o banco final gerado nesta execução, sem abrir o arquivo por associação.
+- Abrir relatório: abre o RELATORIO_RECUPERACAO.txt quando disponível.
+- Abrir pasta: abre a pasta do resultado real gerado pela rotina.
+
 8. PÓS-RECUPERAÇÃO / SAÚDE
 - O banco final só recebe APTO PARA PRODUÇÃO quando os gates críticos passam.
 - O Toolbox exige acesso SQL, sweep final concluído, validação estrutural sem corrupção, zero transações em limbo e zero índices/PRIMARY KEY/UNIQUE inativos.
@@ -6936,7 +7441,11 @@ func helpSections() []helpSection {
 3. Se quiser restaurar, escolha a versão em "Restaurar para".
 4. Selecione banco de origem, destino e pasta de backup.
 5. Confira instalação do Firebird, portas e credenciais.
-6. Clique em Executar e acompanhe Etapa, Progresso, Tempo e Resultado.
+6. Clique em Executar. A pré-validação confere arquivo, Firebird, porta, gravação e espaço livre antes de iniciar.
+7. Acompanhe Fase, Progresso, Tempo e Resultado. No término, use Localizar banco, Abrir relatório ou Abrir pasta quando esses resultados existirem.
+
+PREFERÊNCIAS
+O Toolbox lembra rotina, versões e caminhos não sensíveis entre sessões. A senha nunca é salva.
 
 VERSÕES SUPORTADAS
 Firebird 1.0, 1.5, 2.0, 2.1, 2.5, 3.0, 4.0 e 5.0.
@@ -7097,6 +7606,7 @@ func helpWndProc(hwnd syscall.Handle, uMsg uint32, wParam, lParam uintptr) uintp
 			}
 		}
 	case WM_CLOSE:
+		savePreferences(collectConfig())
 		procDestroyWindow.Call(uintptr(hwnd))
 		return 0
 	case WM_DESTROY:
@@ -7385,6 +7895,69 @@ func openDirectoryNative(dir string) error {
 	return fmt.Errorf("o Windows não conseguiu abrir a pasta (ShellExecute=%d)", r)
 }
 
+func openFileNative(path string) error {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "" || !fileExists(path) {
+		return errors.New("o arquivo informado não existe")
+	}
+	r, _, _ := procShellExecuteW.Call(
+		uintptr(mainHwnd),
+		uintptr(unsafe.Pointer(u16("open"))),
+		uintptr(unsafe.Pointer(u16(path))),
+		0,
+		0,
+		SW_SHOWNORMAL,
+	)
+	if r > 32 {
+		return nil
+	}
+	return fmt.Errorf("o Windows não conseguiu abrir o arquivo (ShellExecute=%d)", r)
+}
+
+func updateResultButtons() {
+	_, _, report := runResultSnapshot()
+	enableControl(idOpenReport, fileExists(report))
+	dest := strings.TrimSpace(getText(idDest))
+	if fileGeneratedThisRun(dest) {
+		setLastDatabase(dest)
+	} else {
+		setLastDatabase("")
+	}
+	enableControl(idOpenDatabase, fileExists(lastDatabaseSnapshot()))
+}
+
+func openResultReport() {
+	_, _, report := runResultSnapshot()
+	if report == "" || !fileExists(report) {
+		messageBox("Firebird Toolbox", "Ainda não há um relatório de recuperação disponível.", MB_OK|MB_ICONINFO)
+		return
+	}
+	if err := openFileNative(report); err != nil {
+		messageBox("Firebird Toolbox", "Não foi possível abrir o relatório.\n\n"+err.Error(), MB_OK|MB_ICONERROR)
+		return
+	}
+	setStatus("Relatório de recuperação aberto.")
+}
+
+func openResultDatabase() {
+	dest := lastDatabaseSnapshot()
+	if dest == "" || !fileExists(dest) {
+		messageBox("Firebird Toolbox", "Ainda não há um banco final gerado nesta execução para localizar.", MB_OK|MB_ICONINFO)
+		return
+	}
+	// Bancos Firebird não devem ser executados/abertos por associação. O botão
+	// abre o Explorer já selecionando exatamente o banco final desta execução.
+	args := []string{"/select," + dest}
+	cmd := exec.Command("explorer.exe", args...)
+	if err := cmd.Start(); err != nil {
+		if err2 := openDirectoryNative(filepath.Dir(dest)); err2 != nil {
+			messageBox("Firebird Toolbox", "Não foi possível localizar o banco final.\n\n"+err.Error(), MB_OK|MB_ICONERROR)
+			return
+		}
+	}
+	setStatus("Banco final localizado e selecionado no Windows Explorer.")
+}
+
 func openDestination() {
 	_, backup, report := runResultSnapshot()
 	dir := resolveResultFolder(
@@ -7493,6 +8066,10 @@ func wndProc(hwnd syscall.Handle, uMsg uint32, wParam, lParam uintptr) uintptr {
 				copyDestinationPath()
 			case idHelp:
 				openHelp()
+			case idOpenReport:
+				openResultReport()
+			case idOpenDatabase:
+				openResultDatabase()
 			case idClearLog:
 				clearLog()
 			case idCopyLog:
@@ -7513,6 +8090,7 @@ func wndProc(hwnd syscall.Handle, uMsg uint32, wParam, lParam uintptr) uintptr {
 			}
 			runMu.Unlock()
 		}
+		savePreferences(collectConfig())
 		procDestroyWindow.Call(uintptr(hwnd))
 		return 0
 	case WM_DESTROY:
@@ -7546,7 +8124,7 @@ func buildUI() {
 	createControl(0, "STATIC", "Firebird 1.0 a 5.0 • manutenção, recuperação e restauração segura", WS_CHILD|WS_VISIBLE, 56, 39, 430, 20, 3002)
 	createControl(0, "STATIC", "v"+appVersion+"  •  "+buildArchLabel(), WS_CHILD|WS_VISIBLE, 744, 22, 160, 20, 3004)
 
-	createControl(0, "BUTTON", "", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 16, 66, 888, 106, 0)
+	addSectionBox(16, 66, 888, 106)
 	addSectionHeader(idSectionRoutine, "gear", "1. Rotina e versão", 30, 72)
 	createControl(0, "STATIC", "Rotina:", WS_CHILD|WS_VISIBLE, 30, 106, 62, 20, 3003)
 	addCombo(idRoutine, routineNames(routines), 96, 102, 270, 0)
@@ -7557,7 +8135,7 @@ func buildUI() {
 	addCombo(idRestoreVersion, restoreVersions, 738, 102, 146, restoreVersionIndex("5.0"))
 	createControl(0, "STATIC", routines[0].Description, WS_CHILD|WS_VISIBLE, 30, 140, 850, 20, idDescription)
 
-	createControl(0, "BUTTON", "", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 16, 182, 888, 140, 0)
+	addSectionBox(16, 182, 888, 140)
 	addSectionHeader(idSectionFiles, "folder", "2. Origem e destino", 30, 188)
 	createControl(0, "STATIC", "Banco de origem:", WS_CHILD|WS_VISIBLE, 30, 220, uiFilesLabelWidth, 20, lblSource)
 	createControl(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, uiFilesFieldX, 216, 778-uiFilesFieldX, 26, idSource)
@@ -7571,7 +8149,7 @@ func buildUI() {
 	createControl(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, uiFilesFieldX, 286, 778-uiFilesFieldX, 26, idBackupDir)
 	createIconButton(idBackupDirBtn, "Procurar", 790, 285, 94, 28)
 
-	createControl(0, "BUTTON", "", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 16, 332, 888, 168, 0)
+	addSectionBox(16, 332, 888, 168)
 	addSectionHeader(idSectionFirebird, "database", "3. Configurações do Firebird", 30, 338)
 	createControl(0, "STATIC", "Firebird da rotina:", WS_CHILD|WS_VISIBLE, 30, 372, uiFirebirdLabelWidth, 20, lblFbSource)
 	createControl(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, uiFirebirdFieldX, 368, 682-uiFirebirdFieldX, 26, idFbSource)
@@ -7593,7 +8171,7 @@ func buildUI() {
 	createControl(WS_EX_CLIENTEDGE, "EDIT", "masterkey", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL|ES_PASSWORD, 582, 443, 166, 26, idPassword)
 	createIconButton(idPasswordToggle, "Mostrar senha", 760, 442, 124, 28)
 
-	createControl(0, "BUTTON", "", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 16, 510, 888, 204, 0)
+	addSectionBox(16, 510, 888, 204)
 	addSectionHeader(idSectionExecute, "play", "4. Executar", 30, 516)
 	createIconButton(idExecute, "Executar", 30, 544, 124, 32)
 	createIconButton(idStop, "Parar", 164, 544, 94, 32)
@@ -7601,9 +8179,12 @@ func buildUI() {
 	createIconButton(idCopyPath, "Copiar caminho", 402, 544, 134, 32)
 	createIconButton(idHelp, "Ajuda", 546, 544, 96, 32)
 
+	// Os atalhos de resultado ficam em uma segunda linha. Assim os textos completos
+	// permanecem legíveis sem apertar as ações principais nem aumentar a janela.
 	createControl(0, "STATIC", "Pular tabelas (avançado):", WS_CHILD|WS_VISIBLE, 30, 586, 158, 20, lblSkipData)
-	createControl(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, uiSkipEditX, 582, uiSkipEditWidth, 26, idSkipData)
-	createControl(0, "STATIC", "Regex opcional do gbak -skip_data (FB 3.0+)", WS_CHILD|WS_VISIBLE, uiSkipHintX, 586, uiSkipHintWidth, 20, 3021)
+	createControl(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, uiSkipEditX, uiResultShortcutY, uiSkipEditWidth, 26, idSkipData)
+	createIconButton(idOpenReport, "Abrir relatório", uiOpenReportX, uiResultShortcutY, uiOpenReportWidth, 28)
+	createIconButton(idOpenDatabase, "Localizar banco", uiLocateDatabaseX, uiResultShortcutY, uiLocateDatabaseWidth, 28)
 
 	// Andamento e resultado ocupam linhas próprias para manter textos longos
 	// integralmente legíveis sem disputar espaço com a barra de progresso.
@@ -7621,7 +8202,7 @@ func buildUI() {
 	createControl(0, "STATIC", "Aguardando execução", WS_CHILD|WS_VISIBLE|WS_BORDER|SS_CENTERIMAGE, 102, 684, 780, 26, idResult)
 	setControlFont(idResult, sectionFont)
 
-	createControl(0, "BUTTON", "", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 16, 720, 888, 170, 0)
+	addSectionBox(16, 720, 888, 170)
 	addSectionHeader(idSectionLog, "terminal", "Log de execução", 30, 726)
 	createIconButton(idDetailedLog, "Ver detalhes", 522, 726, 130, 28)
 	createIconButton(idClearLog, "Limpar", 662, 726, 102, 28)
@@ -7639,10 +8220,13 @@ func buildUI() {
 	setText(idSourcePort, detectFirebirdPort(getText(idFbSource), "5.0"))
 	setText(idTargetPort, detectFirebirdPort(getText(idFbTarget), "5.0"))
 	enableControl(idStop, false)
+	enableControl(idOpenReport, false)
+	enableControl(idOpenDatabase, false)
 	applyPasswordVisibility(false)
 	setProgressState(PBST_NORMAL)
 	setProgress(0, "Aguardando...")
 	routineChanged()
+	applySavedPreferences()
 }
 
 func createFont(height int32, weight int32, face string) syscall.Handle {
@@ -7671,6 +8255,14 @@ func main() {
 	defer procCoUninitialize.Call()
 	hinst, _, _ := procGetModuleHandleW.Call(0)
 	cursor, _, _ := procLoadCursorW.Call(0, IDC_ARROW)
+	appIconSmall = loadAppResourceIcon(syscall.Handle(hinst), 16)
+	appIconBig = loadAppResourceIcon(syscall.Handle(hinst), 32)
+	if appIconSmall != 0 {
+		liveIcons = append(liveIcons, appIconSmall)
+	}
+	if appIconBig != 0 && appIconBig != appIconSmall {
+		liveIcons = append(liveIcons, appIconBig)
+	}
 	guiFont = createFont(-15, FW_NORMAL, "Segoe UI")
 	titleFont = createFont(-24, FW_SEMIBOLD, "Segoe UI")
 	sectionFont = createFont(-15, FW_SEMIBOLD, "Segoe UI")
@@ -7693,9 +8285,11 @@ func main() {
 		cbSize:        uint32(unsafe.Sizeof(wndClassEx{})),
 		lpfnWndProc:   syscall.NewCallback(wndProc),
 		hInstance:     syscall.Handle(hinst),
+		hIcon:         appIconBig,
 		hCursor:       syscall.Handle(cursor),
 		hbrBackground: syscall.Handle(COLOR_WINDOW + 1),
 		lpszClassName: className,
+		hIconSm:       appIconSmall,
 	}
 	atom, _, err := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 	if atom == 0 {
@@ -7708,9 +8302,11 @@ func main() {
 		cbSize:        uint32(unsafe.Sizeof(wndClassEx{})),
 		lpfnWndProc:   syscall.NewCallback(helpWndProc),
 		hInstance:     syscall.Handle(hinst),
+		hIcon:         appIconBig,
 		hCursor:       syscall.Handle(cursor),
 		hbrBackground: syscall.Handle(COLOR_WINDOW + 1),
 		lpszClassName: helpClassName,
+		hIconSm:       appIconSmall,
 	}
 	if helpAtom, _, helpErr := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&helpClass))); helpAtom == 0 {
 		showStartupFailure(fmt.Sprintf("nao foi possivel registrar a janela de ajuda: %v", helpErr))
@@ -7722,9 +8318,11 @@ func main() {
 		cbSize:        uint32(unsafe.Sizeof(wndClassEx{})),
 		lpfnWndProc:   syscall.NewCallback(conflictWndProc),
 		hInstance:     syscall.Handle(hinst),
+		hIcon:         appIconBig,
 		hCursor:       syscall.Handle(cursor),
 		hbrBackground: syscall.Handle(COLOR_WINDOW + 1),
 		lpszClassName: conflictClassName,
+		hIconSm:       appIconSmall,
 	}
 	if conflictAtom, _, conflictErr := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&conflictClass))); conflictAtom == 0 {
 		showStartupFailure(fmt.Sprintf("nao foi possivel registrar o resolvedor de conflitos: %v", conflictErr))
@@ -7735,7 +8333,7 @@ func main() {
 		0,
 		uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(u16("Firebird Toolbox"))),
-		WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_VISIBLE,
+		WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,
 		120, 40, 930, 966,
 		0, 0, hinst, 0,
 	)

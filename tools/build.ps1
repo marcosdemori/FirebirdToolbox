@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.2.24",
+    [string]$Version = "1.2.31",
     [string]$SigningPfx = "",
     [string]$SigningPassword = "",
     [switch]$AllowUnsignedDev

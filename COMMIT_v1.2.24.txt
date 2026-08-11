@@ -1,1 +1,0 @@
-fix(ui): corrigir repintura e fundos dos textos v1.2.24

@@ -152,7 +152,7 @@ func TestDestinationSuffixesCoverAllVersions(t *testing.T) {
 }
 
 func TestOnlyThreeRoutinesRemain(t *testing.T) {
-	want := []string{"Corrigir banco", "Corrigir banco (avançado)", "Somente restaurar"}
+	want := []string{"Manutenção / conversão", "Recuperar banco corrompido", "Somente restaurar"}
 	if len(routines) != len(want) {
 		t.Fatalf("unexpected routine count: got %d want %d", len(routines), len(want))
 	}
@@ -160,8 +160,17 @@ func TestOnlyThreeRoutinesRemain(t *testing.T) {
 		if routines[i].Name != want[i] {
 			t.Fatalf("routine[%d] = %q, want %q", i, routines[i].Name, want[i])
 		}
-		if strings.Contains(strings.ToLower(routines[i].Name), "converter") {
-			t.Fatalf("converter routine must not be exposed: %q", routines[i].Name)
+	}
+}
+
+func TestLegacyRoutinePreferenceAliases(t *testing.T) {
+	items := routineNames(routines)
+	for legacy, want := range map[string]int{
+		"Corrigir banco":            0,
+		"Corrigir banco (avançado)": 1,
+	} {
+		if got := preferenceRoutineIndex(items, legacy); got != want {
+			t.Fatalf("legacy routine %q = %d, want %d", legacy, got, want)
 		}
 	}
 }
@@ -285,10 +294,10 @@ func TestMergeRecoveryStatsKeepsWorstCounts(t *testing.T) {
 }
 
 func TestProjectCreditAndVersion(t *testing.T) {
-	if appVersion != "1.2.22" {
+	if appVersion != "1.2.31" {
 		t.Fatalf("unexpected app version: %s", appVersion)
 	}
-	if appCredit != "Projeto feito por Marcos De Mori Laiola" {
+	if appCredit != "Feito por Marcos De Mori Laiola" {
 		t.Fatalf("unexpected project credit: %s", appCredit)
 	}
 }
@@ -309,14 +318,48 @@ func TestUILayoutReadabilityMinimums(t *testing.T) {
 	if uiElapsedTextWidth < 500 {
 		t.Fatalf("elapsed time area is too narrow: %d", uiElapsedTextWidth)
 	}
-	if uiSkipHintWidth < 290 {
-		t.Fatalf("skip_data help label is too narrow: %d", uiSkipHintWidth)
+	if uiSkipEditWidth < 340 {
+		t.Fatalf("skip_data edit is too narrow: %d", uiSkipEditWidth)
 	}
-	if uiSkipHintX+uiSkipHintWidth > 884 {
-		t.Fatalf("skip_data help label exceeds the execution area: x=%d width=%d", uiSkipHintX, uiSkipHintWidth)
+	if uiSkipEditX+uiSkipEditWidth+10 > uiOpenReportX {
+		t.Fatalf("skip_data edit overlaps result shortcuts: editEnd=%d reportX=%d", uiSkipEditX+uiSkipEditWidth, uiOpenReportX)
 	}
-	if uiSkipEditX+uiSkipEditWidth+12 > uiSkipHintX {
-		t.Fatalf("skip_data edit and help label overlap: editEnd=%d hintX=%d", uiSkipEditX+uiSkipEditWidth, uiSkipHintX)
+	if uiOpenReportWidth < 145 {
+		t.Fatalf("open report button is too narrow: %d", uiOpenReportWidth)
+	}
+	if uiSectionBorderLift < 6 || uiSectionBorderLift > 10 {
+		t.Fatalf("section border lift must keep the top line above headers without changing layout: %d", uiSectionBorderLift)
+	}
+	if uiLocateDatabaseWidth < 160 {
+		t.Fatalf("locate database button is too narrow: %d", uiLocateDatabaseWidth)
+	}
+	if uiLocateDatabaseX+uiLocateDatabaseWidth > 884 {
+		t.Fatalf("result shortcuts exceed execution area: x=%d width=%d", uiLocateDatabaseX, uiLocateDatabaseWidth)
+	}
+}
+
+func TestResultShortcutsGainAccentWhenAvailable(t *testing.T) {
+	for _, id := range []int{idOpenReport, idOpenDatabase} {
+		visual := buttonVisuals[id]
+		if !visual.Accent {
+			t.Fatalf("result shortcut %d must use accent visual when enabled", id)
+		}
+	}
+}
+
+func TestSectionHeadersDoNotHideGroupboxTopBorder(t *testing.T) {
+	limits := map[int]int32{
+		idSectionRoutine:  170,
+		idSectionFiles:    190,
+		idSectionFirebird: 250,
+		idSectionExecute:  125,
+		idSectionLog:      160,
+	}
+	for id, maxWidth := range limits {
+		width := sectionHeaderWidth(id)
+		if width <= 0 || width > maxWidth {
+			t.Fatalf("section header %d hides too much of the groupbox border: width=%d max=%d", id, width, maxWidth)
+		}
 	}
 }
 
@@ -584,14 +627,14 @@ func TestSuspectedRelationIgnoresGenericTableWords(t *testing.T) {
 func TestHelpTextCoversCoreWorkflows(t *testing.T) {
 	text := helpText()
 	for _, want := range []string{
-		"Corrigir banco",
-		"Corrigir banco (avançado)",
+		"Manutenção / conversão",
+		"Recuperar banco corrompido",
 		"Somente restaurar",
 		"PULAR TABELAS (REGEX)",
 		"RECUPERAÇÃO PARCIAL",
 		"RELATORIO_RECUPERACAO.txt",
 		"LOG_TECNICO_RECUPERACAO.txt",
-		"Projeto feito por Marcos De Mori Laiola",
+		"Feito por Marcos De Mori Laiola",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("help text missing %q", want)
@@ -747,8 +790,9 @@ func TestWindowsDistributionMetadataConfig(t *testing.T) {
 	for _, want := range []string{
 		`"CompanyName": "Marcos De Mori Laiola"`,
 		`"ProductName": "Firebird Toolbox"`,
-		`"FileVersion": "1.2.22.0"`,
-		`"ProductVersion": "1.2.22"`,
+		`"FileDescription": "Firebird Toolbox - manutenção, conversão e recuperação Firebird"`,
+		`"FileVersion": "1.2.31.0"`,
+		`"ProductVersion": "1.2.31"`,
 		`"execution-level": "as invoker"`,
 		`"use-common-controls-v6": true`,
 	} {
@@ -778,6 +822,19 @@ func TestWindowsBuildScriptsPassLdflagsAsSeparateArgument(t *testing.T) {
 		}
 		if !strings.Contains(text, "$ld") {
 			t.Fatalf("%s must pass the ldflags value separately", path)
+		}
+	}
+}
+
+func TestWindowsBuildVerifierRequiresIconAndManifest(t *testing.T) {
+	data, err := os.ReadFile("tools/verify-windows-build.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{"RT_GROUP_ICON (14)", "RT_MANIFEST (24)", "Diretorio de recursos Windows ausente"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("Windows build verifier missing resource gate %q", want)
 		}
 	}
 }
@@ -1199,5 +1256,132 @@ func TestStaticLabelsUseSolidWindowBackgroundInsteadOfTransparentBrush(t *testin
 	}
 	if strings.Contains(text, "nullBrush, _, _ := procGetStockObject.Call(NULL_BRUSH)") {
 		t.Fatal("transparent NULL_BRUSH path reintroduced; it causes stale/duplicated labels on repaint")
+	}
+}
+
+func TestPreflightGuardsLongRunningRecovery(t *testing.T) {
+	data, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"runPreflight(c)",
+		"ensureWritableDir",
+		"diskFreeBytes",
+		"GetDiskFreeSpaceExW",
+		"probeFirebirdVersion",
+		"portReachable",
+		"Pré-validação reprovada",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("preflight regression: missing %q", want)
+		}
+	}
+}
+
+func TestPreferencesNeverPersistPassword(t *testing.T) {
+	data, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	start := strings.Index(text, "type appPreferences struct")
+	end := strings.Index(text[start:], "func preferencesPath")
+	if start < 0 || end < 0 {
+		t.Fatal("appPreferences block not found")
+	}
+	block := text[start : start+end]
+	for _, forbidden := range []string{"Password", "password", "Senha", "senha"} {
+		if strings.Contains(block, forbidden) {
+			t.Fatalf("sensitive preference field reintroduced: %q", forbidden)
+		}
+	}
+	if !strings.Contains(text, `filepath.Join(base, "FirebirdToolbox", "preferences.json")`) {
+		t.Fatal("preferences path must stay isolated under the user config directory")
+	}
+}
+
+func TestProgressAndCancellationAreOperatorFriendly(t *testing.T) {
+	data, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		`Fase %d/%d • %s`,
+		"Cancelamento solicitado — aguardando gbak/gfix encerrar com segurança",
+		"aguardando encerramento seguro do processo Firebird",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("operator progress regression: missing %q", want)
+		}
+	}
+}
+
+func TestResultShortcutsRemainAvailable(t *testing.T) {
+	data, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		`createIconButton(idOpenReport, "Abrir relatório", uiOpenReportX, uiResultShortcutY, uiOpenReportWidth, 28)`,
+		`createIconButton(idOpenDatabase, "Localizar banco", uiLocateDatabaseX, uiResultShortcutY, uiLocateDatabaseWidth, 28)`,
+		"openResultReport()",
+		"openResultDatabase()",
+		`"/select," + dest`,
+		"fileGeneratedThisRun(dest)",
+		"lastDatabaseSnapshot()",
+		"Banco final localizado e selecionado no Windows Explorer.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("result shortcut regression: missing %q", want)
+		}
+	}
+}
+
+func TestDPIValidationChecklistCoversCommonWindowsScales(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("docs", "VALIDACAO_DPI.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{"100%", "125%", "150%", "175%", "Abrir relatório", "Localizar banco", "Fase X/Y"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("DPI validation checklist missing %q", want)
+		}
+	}
+}
+
+func TestMainWindowIconIsAppliedBeforeWindowIsShown(t *testing.T) {
+	data, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		`procLoadImageW.Call(`,
+		`uintptr(1), // MAKEINTRESOURCE(1)`,
+		`hIcon:         appIconBig`,
+		`hIconSm:       appIconSmall`,
+		`setAppIcons()`,
+		`procShowWindow.Call(hwnd, SW_SHOW)`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("window/taskbar icon regression: missing %q", want)
+		}
+	}
+	mainWindowStart := strings.Index(text, `uintptr(unsafe.Pointer(u16("Firebird Toolbox")))`)
+	if mainWindowStart < 0 {
+		t.Fatal("main window creation block not found")
+	}
+	mainWindowEnd := strings.Index(text[mainWindowStart:], `mainHwnd = syscall.Handle(hwnd)`)
+	if mainWindowEnd < 0 {
+		t.Fatal("main window creation block end not found")
+	}
+	block := text[mainWindowStart : mainWindowStart+mainWindowEnd]
+	if strings.Contains(block, `WS_VISIBLE`) {
+		t.Fatal("main window must be created hidden so the taskbar never sees it before the app icon is applied")
 	}
 }
