@@ -29,11 +29,11 @@ import (
 	"unsafe"
 )
 
-var appVersion = "1.2.20"
+var appVersion = "1.2.24"
 var appCredit = "Projeto feito por Marcos De Mori Laiola"
 
 // Os BATs originais continuam incorporados como referencia/documentacao da logica
-// que originou o utilitario. A v1.2.20 executa gfix/gbak diretamente para manter
+// que originou o utilitario. A v1.2.24 executa gfix/gbak diretamente para manter
 // todo o log dentro da interface e permitir combinar versoes de origem/destino.
 //
 //go:embed scripts/*.bat LEIA-ME.md assets/*.ico
@@ -69,6 +69,12 @@ const (
 	CBS_DROPDOWNLIST = 0x0003
 	CBS_HASSTRINGS   = 0x0200
 
+	LBS_NOTIFY    = 0x0001
+	LB_ADDSTRING  = 0x0180
+	LB_SETCURSEL  = 0x0186
+	LB_GETCURSEL  = 0x0188
+	LBN_SELCHANGE = 1
+
 	CB_ADDSTRING  = 0x0143
 	CB_SETCURSEL  = 0x014E
 	CB_GETCURSEL  = 0x0147
@@ -79,10 +85,15 @@ const (
 	EM_SETSEL          = 0x00B1
 	EM_REPLACESEL      = 0x00C2
 	EM_SCROLLCARET     = 0x00B7
+	EM_SETMARGINS      = 0x00D3
 	EM_SETPASSWORDCHAR = 0x00CC
 
-	SW_HIDE = 0
-	SW_SHOW = 5
+	EC_LEFTMARGIN  = 0x0001
+	EC_RIGHTMARGIN = 0x0002
+
+	SW_HIDE       = 0
+	SW_SHOWNORMAL = 1
+	SW_SHOW       = 5
 
 	MB_OK           = 0x00000000
 	MB_ICONERROR    = 0x00000010
@@ -106,10 +117,12 @@ const (
 
 	CREATE_NO_WINDOW = 0x08000000
 
-	BS_GROUPBOX  = 0x00000007
-	BS_OWNERDRAW = 0x0000000B
-	SS_ICON      = 0x00000003
-	STM_SETICON  = 0x0170
+	BS_GROUPBOX    = 0x00000007
+	BS_OWNERDRAW   = 0x0000000B
+	SS_ICON        = 0x00000003
+	SS_CENTERIMAGE = 0x00000200
+	SS_ETCHEDHORZ  = 0x00000010
+	STM_SETICON    = 0x0170
 
 	ILC_MASK         = 0x00000001
 	ILC_COLOR32      = 0x00000020
@@ -144,6 +157,7 @@ const (
 	DT_SINGLELINE   = 0x00000020
 	DT_END_ELLIPSIS = 0x00008000
 	TRANSPARENT     = 1
+	NULL_BRUSH      = 5
 	DI_NORMAL       = 0x0003
 )
 
@@ -184,8 +198,11 @@ const (
 	idSkipData       = 1034
 	idElapsed        = 1035
 
-	idHelpCopy  = 4101
-	idHelpClose = 4102
+	idHelpCopy         = 4101
+	idHelpClose        = 4102
+	idHelpNav          = 4103
+	idHelpSectionTitle = 4104
+	idHelpSectionIntro = 4105
 
 	idConflictKeep1  = 4201
 	idConflictKeep2  = 4202
@@ -229,6 +246,13 @@ const (
 	uiSkipHintX          int32 = 584
 	uiSkipHintWidth      int32 = 300
 	uiLogEditHeight      int32 = 116
+
+	uiHelpWindowWidth   int32 = 850
+	uiHelpWindowHeight  int32 = 700
+	uiHelpNavWidth      int32 = 180
+	uiHelpContentWidth  int32 = 588
+	uiHelpContentHeight int32 = 390
+	uiHelpBottomY       int32 = 610
 )
 
 type routineKind int
@@ -397,6 +421,7 @@ var (
 	procGetWindowTextW           = user32.NewProc("GetWindowTextW")
 	procGetWindowTextLen         = user32.NewProc("GetWindowTextLengthW")
 	procEnableWindow             = user32.NewProc("EnableWindow")
+	procIsWindowEnabled          = user32.NewProc("IsWindowEnabled")
 	procMessageBoxW              = user32.NewProc("MessageBoxW")
 	procLoadCursorW              = user32.NewProc("LoadCursorW")
 	procDestroyIcon              = user32.NewProc("DestroyIcon")
@@ -425,6 +450,7 @@ var (
 	procGetOpenFileNameW     = comdlg32.NewProc("GetOpenFileNameW")
 	procGetSaveFileNameW     = comdlg32.NewProc("GetSaveFileNameW")
 	procSHBrowseForFolderW   = shell32.NewProc("SHBrowseForFolderW")
+	procShellExecuteW        = shell32.NewProc("ShellExecuteW")
 	procSHGetPathFromIDListW = shell32.NewProc("SHGetPathFromIDListW")
 	procCoTaskMemFree        = ole32.NewProc("CoTaskMemFree")
 	procCoInitializeEx       = ole32.NewProc("CoInitializeEx")
@@ -446,16 +472,24 @@ var (
 )
 
 var (
-	mainHwnd        syscall.Handle
-	helpHwnd        syscall.Handle
-	helpContentHwnd syscall.Handle
-	conflictHwnd    syscall.Handle
-	controls        = map[int]syscall.Handle{}
-	guiFont         syscall.Handle
-	titleFont       syscall.Handle
-	sectionFont     syscall.Handle
-	monoFont        syscall.Handle
-	logBrush        syscall.Handle
+	mainHwnd             syscall.Handle
+	helpHwnd             syscall.Handle
+	helpContentHwnd      syscall.Handle
+	helpNavHwnd          syscall.Handle
+	helpSectionTitleHwnd syscall.Handle
+	helpSectionIntroHwnd syscall.Handle
+	conflictHwnd         syscall.Handle
+	controls             = map[int]syscall.Handle{}
+	guiFont              syscall.Handle
+	titleFont            syscall.Handle
+	sectionFont          syscall.Handle
+	monoFont             syscall.Handle
+	logBrush             syscall.Handle
+	staticBrushWhite     syscall.Handle
+	resultBrushNeutral   syscall.Handle
+	resultBrushSuccess   syscall.Handle
+	resultBrushWarning   syscall.Handle
+	resultBrushError     syscall.Handle
 
 	runMu         sync.Mutex
 	currentCancel context.CancelFunc
@@ -504,6 +538,8 @@ var (
 		idDetailedLog:    {Icon: "details"},
 		idClearLog:       {Icon: "clear"},
 		idCopyLog:        {Icon: "copy"},
+		idHelpCopy:       {Icon: "copy"},
+		idHelpClose:      {Primary: true},
 	}
 )
 
@@ -622,8 +658,11 @@ func addIcon(name string, x, y, size int32) syscall.Handle {
 }
 
 func addSectionHeader(id int, name, title string, x, y int32) {
-	addIcon(name, x, y+1, 18)
-	h := createControl(0, "STATIC", title, WS_CHILD|WS_VISIBLE, x+26, y, 300, 22, id)
+	// Mantem o cabeçalho dentro da seção, evitando que a borda superior do groupbox
+	// passe por cima do texto em alguns DPI/temas do Windows.
+	headerY := y + 4
+	addIcon(name, x, headerY+1, 18)
+	h := createControl(0, "STATIC", title, WS_CHILD|WS_VISIBLE, x+26, headerY, 320, 22, id)
 	if sectionFont != 0 {
 		procSendMessageW.Call(uintptr(h), WM_SETFONT, uintptr(sectionFont), 1)
 	}
@@ -703,7 +742,7 @@ func drawOwnerButton(dis *drawItemStruct) bool {
 	}
 	textRect.left += offset
 	textRect.top += offset
-	drawText(dis.HDC, getText(int(dis.CtlID)), &textRect, DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS)
+	drawText(dis.HDC, getWindowText(dis.HwndItem), &textRect, DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS)
 
 	if dis.ItemState&ODS_FOCUS != 0 && !disabled {
 		focus := dis.RcItem
@@ -799,6 +838,16 @@ func getText(id int) string {
 	}
 	buf := make([]uint16, n+1)
 	procGetWindowTextW.Call(uintptr(h), uintptr(unsafe.Pointer(&buf[0])), n+1)
+	return syscall.UTF16ToString(buf)
+}
+
+func getWindowText(hwnd syscall.Handle) string {
+	if hwnd == 0 {
+		return ""
+	}
+	n, _, _ := procGetWindowTextLen.Call(uintptr(hwnd))
+	buf := make([]uint16, n+1)
+	procGetWindowTextW.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&buf[0])), n+1)
 	return syscall.UTF16ToString(buf)
 }
 
@@ -2405,10 +2454,10 @@ func toggleDetailedLog() {
 	}
 	detailedLog = !detailedLog
 	if detailedLog {
-		setText(idDetailedLog, "Detalhado: sim")
+		setText(idDetailedLog, "Resumir log")
 		setStatus("Log detalhado ativado. O gbak exibira todas as etapas tecnicas.")
 	} else {
-		setText(idDetailedLog, "Detalhado: não")
+		setText(idDetailedLog, "Ver detalhes")
 		setStatus("Log resumido ativado. O gbak exibira apenas mensagens essenciais.")
 	}
 }
@@ -6850,11 +6899,11 @@ Falha do gbak em uma tabela
 - Se qualquer gate crítico falhar, o estado final é NÃO APTO PARA PRODUÇÃO e o banco não deve substituir o banco em uso.
 
 9. LOG RESUMIDO E DETALHADO
-Detalhado: não
-- Mostra etapas, avisos, erros e resultado final.
-
-Detalhado: sim
+Ver detalhes
 - Mostra comandos e saída técnica ampliada para diagnóstico.
+
+Resumir log
+- Volta a mostrar apenas etapas, avisos, erros e resultado final.
 - No modo avançado, o log técnico completo também é preservado em arquivo mesmo quando a tela está resumida.
 
 10. BOAS PRÁTICAS DE SEGURANÇA
@@ -6865,10 +6914,142 @@ Detalhado: sim
 - Um backup só deve ser considerado confiável depois de um restore de teste aprovado.
 
 11. ONDE ENCONTRAR MAIS DETALHES
-Use o botão Copiar ajuda para copiar este guia. Os arquivos LEIA-ME.md e README_FirebirdToolbox.md incluídos no pacote também documentam o funcionamento do utilitário.
+Use o botão Copiar guia completo para copiar este guia. Os arquivos LEIA-ME.md e README_FirebirdToolbox.md incluídos no pacote também documentam o funcionamento do utilitário.
 
 Firebird Toolbox v` + appVersion + `
 ` + appCredit)
+}
+
+type helpSection struct {
+	Title   string
+	Intro   string
+	Content string
+}
+
+func helpSections() []helpSection {
+	return []helpSection{
+		{
+			Title: "Comece por aqui",
+			Intro: "Fluxo recomendado para uma manutenção ou restauração segura.",
+			Content: strings.TrimSpace(`1. Escolha a rotina adequada.
+2. Informe a versão do Firebird que abrirá o banco de origem.
+3. Se quiser restaurar, escolha a versão em "Restaurar para".
+4. Selecione banco de origem, destino e pasta de backup.
+5. Confira instalação do Firebird, portas e credenciais.
+6. Clique em Executar e acompanhe Etapa, Progresso, Tempo e Resultado.
+
+VERSÕES SUPORTADAS
+Firebird 1.0, 1.5, 2.0, 2.1, 2.5, 3.0, 4.0 e 5.0.
+
+O Toolbox procura gbak.exe, gfix.exe e gstat.exe na instalação detectada. Restaurar para versão posterior é o caminho mais comum de migração. Uma restauração para versão anterior pode falhar por incompatibilidade de metadados.
+
+TEMPO DECORRIDO
+O cronômetro começa ao confirmar a execução e é congelado no término, inclusive em erro, conflito, recuperação parcial ou cancelamento.`),
+		},
+		{
+			Title: "Rotinas",
+			Intro: "Use a rotina simples no dia a dia e a avançada apenas quando houver corrupção real.",
+			Content: strings.TrimSpace(`CORRIGIR BANCO
+Valida o banco, executa sweep, gera backup e, quando solicitado, restaura em outra versão. É o modo indicado para manutenção normal.
+
+CORRIGIR BANCO (AVANÇADO)
+Indicado para erros de página, BLOB, índice, falhas de gbak ou corrupção real. O Toolbox trabalha sobre cópia, faz diagnóstico, pode usar gfix -mend apenas na cópia, gera backup de recuperação e executa restore real de teste.
+
+SOMENTE RESTAURAR
+Restaura um arquivo .BAK/.FBK/.GBK diretamente para o destino usando a versão selecionada.
+
+PULAR TABELAS (REGEX)
+Disponível no modo avançado em Firebird 3.0+. Usa gbak -skip_data. O campo é opcional e deve ser usado apenas quando você realmente deseja excluir os dados correspondentes. Quando uma relação é detectada automaticamente, o skip_data pode ser apenas uma etapa intermediária de recuperação.`),
+		},
+		{
+			Title: "Recuperação avançada",
+			Intro: "O banco original é preservado; reparos destrutivos acontecem somente na cópia de trabalho.",
+			Content: strings.TrimSpace(`ÍNDICES E LEITURA NATURAL
+Quando a falha parece estar em índice, o Toolbox tenta preservar os dados e usa leitura NATURAL para evitar depender do índice corrompido.
+
+CHAVES DUPLICADAS
+Se o restore falhar em PRIMARY KEY/UNIQUE, a restauração é refeita com gbak -inactive. Duplicidades idênticas podem ser saneadas na cópia. Quando os registros diferem, o resolvedor mostra Registro 1 e Registro 2 e exige decisão explícita. Se aparecer OUTRA chave duplicada, o fluxo continua em loop.
+
+RECONSTRUÇÃO LIMPA
+No Firebird 3.0+, se um índice continuar inativo sem nova duplicidade detectável, o Toolbox pode reconstruir a relação em uma base limpa, copiar os registros por leitura NATURAL, reativar triggers/índices e conferir as contagens.
+
+ARQUIVOS IMPORTANTES
+RELATORIO_RECUPERACAO.txt: resumo das ações e resultado.
+LOG_TECNICO_RECUPERACAO.txt: saída técnica completa.
+CONFLITOS_DUPLICIDADE.txt: detalhes das chaves e registros conflitantes.
+RELATORIO_SAUDE_PERFORMANCE.txt: gates finais de saúde e estrutura.
+
+Não apague a pasta RECOVERY_... até concluir a homologação do banco recuperado.`),
+		},
+		{
+			Title: "Resultados e saúde",
+			Intro: "O resultado visual resume o estado; o relatório técnico continua sendo a fonte de confirmação.",
+			Content: strings.TrimSpace(`RECUPERAÇÃO COMPLETA
+Backup criado, restore de teste aprovado e nenhum dado foi excluído deliberadamente.
+
+RECUPERAÇÃO PARCIAL
+Existe resultado para inspeção, mas alguma relação não manteve todos os registros ou houve decisão explícita sobre uma duplicidade. Revise o relatório antes de produção.
+
+BACKUP CRIADO MAS NÃO VALIDADO
+O arquivo existe, porém o restore de teste não passou. Não trate esse backup como seguro.
+
+APTO PARA PRODUÇÃO
+Exige acesso SQL, sweep final, validação estrutural sem corrupção, zero transações em limbo e zero índices/PRIMARY KEY/UNIQUE inativos, além das comparações aplicáveis.
+
+NÃO APTO PARA PRODUÇÃO
+Um gate crítico falhou. Não substitua o banco em uso por esse resultado.
+
+LOG
+"Ver detalhes" amplia a saída técnica do gbak. "Resumir log" volta ao modo essencial. No modo avançado, o log técnico completo também é preservado em arquivo.`),
+		},
+		{
+			Title: "Erros e segurança",
+			Intro: "Preserve sempre o original e trate mensagens estruturais como sinal para usar o modo avançado.",
+			Content: strings.TrimSpace(`WRONG PAGE TYPE / DATABASE PAGE ERRORS
+Indicam corrupção estrutural de página.
+
+INDEX PAGE ERRORS
+Podem indicar corrupção de índice. Backup/restore costuma reconstruir índices, mas erros combinados exigem cautela.
+
+BLOB ERRORS
+Pode haver perda localizada em campos BLOB.
+
+TRANSACTION ... IN LIMBO
+Existe transação distribuída pendente. O Toolbox diagnostica, mas não decide commit/rollback automaticamente.
+
+BOAS PRÁTICAS
+- Nunca faça recuperação pesada sobre a única cópia do banco.
+- Mantenha o banco fora de uso durante validação/reparo sempre que possível.
+- Preserve a pasta RECOVERY_... até validar sistema e dados.
+- Um backup só é confiável depois de restore de teste aprovado.
+- Em recuperação parcial, confira as relações, chaves e dependências citadas no relatório.
+
+Para o guia integral, use "Copiar guia completo". Os arquivos LEIA-ME.md e README_FirebirdToolbox.md do pacote também documentam o utilitário.`),
+		},
+	}
+}
+
+func setHelpSection(index int) {
+	sections := helpSections()
+	if len(sections) == 0 {
+		return
+	}
+	if index < 0 || index >= len(sections) {
+		index = 0
+	}
+	section := sections[index]
+	if helpSectionTitleHwnd != 0 {
+		procSetWindowTextW.Call(uintptr(helpSectionTitleHwnd), uintptr(unsafe.Pointer(u16(section.Title))))
+	}
+	if helpSectionIntroHwnd != 0 {
+		procSetWindowTextW.Call(uintptr(helpSectionIntroHwnd), uintptr(unsafe.Pointer(u16(section.Intro))))
+	}
+	if helpContentHwnd != 0 {
+		text := strings.ReplaceAll(section.Content, "\n", "\r\n")
+		procSetWindowTextW.Call(uintptr(helpContentHwnd), uintptr(unsafe.Pointer(u16(text))))
+		procSendMessageW.Call(uintptr(helpContentHwnd), EM_SETSEL, 0, 0)
+		procSendMessageW.Call(uintptr(helpContentHwnd), EM_SCROLLCARET, 0, 0)
+	}
 }
 
 func createHelpControl(exStyle uint32, className, text string, style uint32, x, y, w, h int32, id int) syscall.Handle {
@@ -6889,13 +7070,26 @@ func createHelpControl(exStyle uint32, className, text string, style uint32, x, 
 
 func helpWndProc(hwnd syscall.Handle, uMsg uint32, wParam, lParam uintptr) uintptr {
 	switch uMsg {
+	case WM_DRAWITEM:
+		if lParam != 0 {
+			var dis drawItemStruct
+			procMoveMemory.Call(uintptr(unsafe.Pointer(&dis)), lParam, unsafe.Sizeof(dis))
+			if drawOwnerButton(&dis) {
+				return 1
+			}
+		}
 	case WM_COMMAND:
 		id := int(uint16(wParam & 0xffff))
 		code := int(uint16((wParam >> 16) & 0xffff))
+		if id == idHelpNav && code == LBN_SELCHANGE && helpNavHwnd != 0 {
+			selected, _, _ := procSendMessageW.Call(uintptr(helpNavHwnd), LB_GETCURSEL, 0, 0)
+			setHelpSection(int(selected))
+			return 0
+		}
 		if code == BN_CLICKED {
 			switch id {
 			case idHelpCopy:
-				copyTextToClipboard(helpText(), "Ajuda copiada para a área de transferência.")
+				copyTextToClipboard(helpText(), "Guia completo copiado para a área de transferência.")
 				return 0
 			case idHelpClose:
 				procDestroyWindow.Call(uintptr(hwnd))
@@ -6908,6 +7102,9 @@ func helpWndProc(hwnd syscall.Handle, uMsg uint32, wParam, lParam uintptr) uintp
 	case WM_DESTROY:
 		helpHwnd = 0
 		helpContentHwnd = 0
+		helpNavHwnd = 0
+		helpSectionTitleHwnd = 0
+		helpSectionIntroHwnd = 0
 		return 0
 	}
 	r, _, _ := procDefWindowProcW.Call(uintptr(hwnd), uintptr(uMsg), wParam, lParam)
@@ -6928,7 +7125,7 @@ func openHelp() {
 		uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(u16("Ajuda - Firebird Toolbox"))),
 		WS_CAPTION|WS_SYSMENU|WS_VISIBLE,
-		190, 75, 790, 760,
+		190, 75, uintptr(uiHelpWindowWidth), uintptr(uiHelpWindowHeight),
 		uintptr(mainHwnd), 0, hinst, 0,
 	)
 	if hwnd == 0 {
@@ -6948,19 +7145,36 @@ func openHelp() {
 	if icon := cachedUIIcon("help", 24); icon != 0 {
 		procSendMessageW.Call(uintptr(helpIcon), STM_SETICON, uintptr(icon), 0)
 	}
-	title := createHelpControl(0, "STATIC", "Ajuda do Firebird Toolbox", WS_CHILD|WS_VISIBLE, 56, 14, 500, 30, 0)
+	title := createHelpControl(0, "STATIC", "Ajuda do Firebird Toolbox", WS_CHILD|WS_VISIBLE, 56, 12, 520, 32, 0)
 	if titleFont != 0 {
 		procSendMessageW.Call(uintptr(title), WM_SETFONT, uintptr(titleFont), 1)
 	}
-	createHelpControl(0, "STATIC", "Guia rápido, recuperação segura e interpretação dos resultados", WS_CHILD|WS_VISIBLE, 22, 47, 720, 22, 0)
+	createHelpControl(0, "STATIC", "Escolha um tópico à esquerda. O guia completo continua disponível para copiar.", WS_CHILD|WS_VISIBLE, 22, 48, 770, 22, 0)
+	createHelpControl(0, "STATIC", "", WS_CHILD|WS_VISIBLE|SS_ETCHEDHORZ, 20, 74, 790, 2, 0)
+	createHelpControl(0, "STATIC", "Segurança: preserve o banco original e valide sempre o restore antes de usar o resultado em produção.", WS_CHILD|WS_VISIBLE|WS_BORDER|SS_CENTERIMAGE, 20, 86, 790, 34, 0)
 
-	helpDisplayText := strings.ReplaceAll(helpText(), "\n", "\r\n")
-	helpContentHwnd = createHelpControl(WS_EX_CLIENTEDGE, "EDIT", helpDisplayText, WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY, 20, 78, 742, 610, 0)
-	procSendMessageW.Call(uintptr(helpContentHwnd), EM_SETSEL, 0, 0)
-	procSendMessageW.Call(uintptr(helpContentHwnd), EM_SCROLLCARET, 0, 0)
+	navTitle := createHelpControl(0, "STATIC", "Tópicos", WS_CHILD|WS_VISIBLE, 20, 136, uiHelpNavWidth, 22, 0)
+	if sectionFont != 0 {
+		procSendMessageW.Call(uintptr(navTitle), WM_SETFONT, uintptr(sectionFont), 1)
+	}
+	helpNavHwnd = createHelpControl(WS_EX_CLIENTEDGE, "LISTBOX", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_VSCROLL|LBS_NOTIFY, 20, 160, uiHelpNavWidth, 420, idHelpNav)
+	for _, section := range helpSections() {
+		procSendMessageW.Call(uintptr(helpNavHwnd), LB_ADDSTRING, 0, uintptr(unsafe.Pointer(u16(section.Title))))
+	}
+	procSendMessageW.Call(uintptr(helpNavHwnd), LB_SETCURSEL, 0, 0)
 
-	createHelpControl(0, "BUTTON", "Copiar ajuda", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 552, 700, 100, 30, idHelpCopy)
-	createHelpControl(0, "BUTTON", "Fechar", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 662, 700, 100, 30, idHelpClose)
+	helpSectionTitleHwnd = createHelpControl(0, "STATIC", "", WS_CHILD|WS_VISIBLE, 220, 134, 590, 26, idHelpSectionTitle)
+	if sectionFont != 0 {
+		procSendMessageW.Call(uintptr(helpSectionTitleHwnd), WM_SETFONT, uintptr(sectionFont), 1)
+	}
+	helpSectionIntroHwnd = createHelpControl(0, "STATIC", "", WS_CHILD|WS_VISIBLE, 220, 162, 590, 42, idHelpSectionIntro)
+	helpContentHwnd = createHelpControl(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY, 218, 206, uiHelpContentWidth, uiHelpContentHeight, 0)
+	procSendMessageW.Call(uintptr(helpContentHwnd), EM_SETMARGINS, EC_LEFTMARGIN|EC_RIGHTMARGIN, uintptr(10|(10<<16)))
+	setHelpSection(0)
+
+	createHelpControl(0, "STATIC", "Firebird Toolbox v"+appVersion+"  •  "+appCredit, WS_CHILD|WS_VISIBLE, 20, uiHelpBottomY+8, 520, 22, 0)
+	createHelpControl(0, "BUTTON", "Copiar guia completo", WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW, 548, uiHelpBottomY, 160, 32, idHelpCopy)
+	createHelpControl(0, "BUTTON", "Fechar", WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW, 718, uiHelpBottomY, 90, 32, idHelpClose)
 	procShowWindow.Call(hwnd, SW_SHOW)
 	procUpdateWindow.Call(hwnd)
 }
@@ -7100,25 +7314,95 @@ func showDuplicateConflictResolver(conflict restoreDuplicateConflict, view dupli
 	return conflictResolverDecision
 }
 
-func openDestination() {
-	d := strings.TrimSpace(getText(idDest))
-	if d == "" {
-		d = strings.TrimSpace(getText(idBackupDir))
+func resolveResultFolder(paths ...string) string {
+	clean := make([]string, 0, len(paths))
+	seen := make(map[string]bool)
+	for _, raw := range paths {
+		path := strings.Trim(strings.TrimSpace(raw), `"`)
+		if path == "" {
+			continue
+		}
+		path = filepath.Clean(path)
+		key := strings.ToLower(path)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		clean = append(clean, path)
 	}
-	if d == "" {
-		return
+
+	// Primeiro prioriza resultados que realmente existem. Isso evita abrir a
+	// pasta de um destino apenas sugerido quando a rotina terminou com relatório
+	// ou backup em outro local.
+	for _, path := range clean {
+		if dirExists(path) {
+			return path
+		}
+		if fileExists(path) {
+			if dir := filepath.Dir(path); dirExists(dir) {
+				return dir
+			}
+		}
 	}
-	dir := d
-	if !dirExists(dir) {
-		dir = filepath.Dir(d)
+
+	// Antes da primeira execução é útil abrir a pasta pai de um arquivo de
+	// destino ainda não criado.
+	for _, path := range clean {
+		dir := filepath.Dir(path)
+		if dir != "." && dirExists(dir) {
+			return dir
+		}
 	}
-	if !dirExists(dir) {
-		messageBox("Firebird Toolbox", "A pasta de destino ainda não existe.", MB_OK|MB_ICONWARNING)
-		return
+	return ""
+}
+
+func openDirectoryNative(dir string) error {
+	dir = filepath.Clean(strings.TrimSpace(dir))
+	if dir == "" || !dirExists(dir) {
+		return errors.New("a pasta informada não existe")
 	}
+
+	// ShellExecute usa o shell do próprio Windows e funciona melhor com caminhos
+	// Unicode, UNC e associações do Explorer do que iniciar explorer.exe às cegas.
+	r, _, _ := procShellExecuteW.Call(
+		uintptr(mainHwnd),
+		uintptr(unsafe.Pointer(u16("open"))),
+		uintptr(unsafe.Pointer(u16(dir))),
+		0,
+		0,
+		SW_SHOWNORMAL,
+	)
+	if r > 32 {
+		return nil
+	}
+
+	// Fallback para instalações do Windows em que o shell retorna um código de
+	// erro, mas o Explorer continua disponível diretamente.
 	cmd := exec.Command("explorer.exe", dir)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	_ = cmd.Start()
+	if err := cmd.Start(); err == nil {
+		return nil
+	}
+	return fmt.Errorf("o Windows não conseguiu abrir a pasta (ShellExecute=%d)", r)
+}
+
+func openDestination() {
+	_, backup, report := runResultSnapshot()
+	dir := resolveResultFolder(
+		strings.TrimSpace(getText(idDest)),
+		report,
+		backup,
+		strings.TrimSpace(getText(idBackupDir)),
+	)
+	if dir == "" {
+		messageBox("Firebird Toolbox", "Ainda não há uma pasta de resultado disponível. Selecione um destino ou execute uma rotina primeiro.", MB_OK|MB_ICONINFO)
+		return
+	}
+	if err := openDirectoryNative(dir); err != nil {
+		messageBox("Firebird Toolbox", "Não foi possível abrir a pasta de resultado.\n\n"+dir+"\n\n"+err.Error(), MB_OK|MB_ICONERROR)
+		appendLog("Falha ao abrir pasta de resultado: " + dir + " - " + err.Error())
+		return
+	}
+	setStatus("Pasta de resultado aberta no Windows Explorer.")
 }
 
 func wndProc(hwnd syscall.Handle, uMsg uint32, wParam, lParam uintptr) uintptr {
@@ -7138,6 +7422,38 @@ func wndProc(hwnd syscall.Handle, uMsg uint32, wParam, lParam uintptr) uintptr {
 			procSetTextColor.Call(wParam, rgb(226, 232, 240))
 			procSetBkColor.Call(wParam, rgb(28, 31, 36))
 			return uintptr(logBrush)
+		}
+		if syscall.Handle(lParam) == controls[idResult] {
+			text := strings.ToUpper(getText(idResult))
+			brush := resultBrushNeutral
+			fg := rgb(51, 65, 85)
+			bg := rgb(248, 250, 252)
+			switch {
+			case strings.Contains(text, "NÃO APTO") || strings.Contains(text, "ERRO"):
+				brush, fg, bg = resultBrushError, rgb(153, 27, 27), rgb(254, 242, 242)
+			case strings.Contains(text, "PARCIAL") || strings.Contains(text, "CONFLITO") || strings.Contains(text, "INTERROMPIDO"):
+				brush, fg, bg = resultBrushWarning, rgb(146, 64, 14), rgb(255, 251, 235)
+			case strings.Contains(text, "✓") || strings.Contains(text, "CONCLUÍDO") || strings.Contains(text, "APTO PARA PRODUÇÃO"):
+				brush, fg, bg = resultBrushSuccess, rgb(22, 101, 52), rgb(240, 253, 244)
+			}
+			procSetTextColor.Call(wParam, fg)
+			procSetBkColor.Call(wParam, bg)
+			if brush != 0 {
+				return uintptr(brush)
+			}
+		}
+
+		// Demais textos estáticos usam o mesmo branco da janela. Isso remove o
+		// fundo cinza sem usar transparência, evitando rastros/duplicações quando
+		// o Windows repinta textos que mudam durante a execução.
+		if enabled, _, _ := procIsWindowEnabled.Call(lParam); enabled == 0 {
+			procSetTextColor.Call(wParam, rgb(148, 163, 184))
+		} else {
+			procSetTextColor.Call(wParam, rgb(17, 24, 39))
+		}
+		procSetBkColor.Call(wParam, rgb(255, 255, 255))
+		if staticBrushWhite != 0 {
+			return uintptr(staticBrushWhite)
 		}
 	case WM_COMMAND:
 		id := int(uint16(wParam & 0xffff))
@@ -7227,7 +7543,7 @@ func buildUI() {
 	addIcon("flame", 20, 14, 28)
 	createControl(0, "STATIC", "Firebird Toolbox", WS_CHILD|WS_VISIBLE, 56, 10, 330, 30, idHeaderTitle)
 	setControlFont(idHeaderTitle, titleFont)
-	createControl(0, "STATIC", "Firebird 1.0 a 5.0 • manutenção, correção e restauração", WS_CHILD|WS_VISIBLE, 56, 39, 430, 20, 3002)
+	createControl(0, "STATIC", "Firebird 1.0 a 5.0 • manutenção, recuperação e restauração segura", WS_CHILD|WS_VISIBLE, 56, 39, 430, 20, 3002)
 	createControl(0, "STATIC", "v"+appVersion+"  •  "+buildArchLabel(), WS_CHILD|WS_VISIBLE, 744, 22, 160, 20, 3004)
 
 	createControl(0, "BUTTON", "", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 16, 66, 888, 106, 0)
@@ -7279,11 +7595,11 @@ func buildUI() {
 
 	createControl(0, "BUTTON", "", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 16, 510, 888, 204, 0)
 	addSectionHeader(idSectionExecute, "play", "4. Executar", 30, 516)
-	createIconButton(idExecute, "Executar", 30, 544, 118, 32)
-	createIconButton(idStop, "Parar", 158, 544, 88, 32)
-	createIconButton(idOpenDest, "Abrir pasta", 256, 544, 120, 32)
-	createIconButton(idCopyPath, "Copiar caminho", 386, 544, 132, 32)
-	createIconButton(idHelp, "Ajuda", 528, 544, 88, 32)
+	createIconButton(idExecute, "Executar", 30, 544, 124, 32)
+	createIconButton(idStop, "Parar", 164, 544, 94, 32)
+	createIconButton(idOpenDest, "Abrir pasta", 268, 544, 124, 32)
+	createIconButton(idCopyPath, "Copiar caminho", 402, 544, 134, 32)
+	createIconButton(idHelp, "Ajuda", 546, 544, 96, 32)
 
 	createControl(0, "STATIC", "Pular tabelas (avançado):", WS_CHILD|WS_VISIBLE, 30, 586, 158, 20, lblSkipData)
 	createControl(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, uiSkipEditX, 582, uiSkipEditWidth, 26, idSkipData)
@@ -7291,7 +7607,7 @@ func buildUI() {
 
 	// Andamento e resultado ocupam linhas próprias para manter textos longos
 	// integralmente legíveis sem disputar espaço com a barra de progresso.
-	createControl(0, "STATIC", "Etapa atual:", WS_CHILD|WS_VISIBLE, 30, 616, 70, 20, 3022)
+	createControl(0, "STATIC", "Etapa:", WS_CHILD|WS_VISIBLE, 30, 616, 70, 20, 3022)
 	createControl(0, "STATIC", "Preparando...", WS_CHILD|WS_VISIBLE, 102, 616, uiProgressTextWidth, 20, idProgressText)
 
 	createControl(0, "STATIC", "Progresso:", WS_CHILD|WS_VISIBLE, 30, 642, 70, 20, 3020)
@@ -7302,14 +7618,15 @@ func buildUI() {
 	createControl(0, "STATIC", formatElapsedDuration(0), WS_CHILD|WS_VISIBLE, 138, 666, uiElapsedTextWidth, 20, idElapsed)
 
 	createControl(0, "STATIC", "Resultado:", WS_CHILD|WS_VISIBLE, 30, 690, 70, 20, 3023)
-	createControl(0, "STATIC", "Aguardando execução", WS_CHILD|WS_VISIBLE, 102, 690, 780, 20, idResult)
+	createControl(0, "STATIC", "Aguardando execução", WS_CHILD|WS_VISIBLE|WS_BORDER|SS_CENTERIMAGE, 102, 684, 780, 26, idResult)
+	setControlFont(idResult, sectionFont)
 
 	createControl(0, "BUTTON", "", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 16, 720, 888, 170, 0)
 	addSectionHeader(idSectionLog, "terminal", "Log de execução", 30, 726)
-	createIconButton(idDetailedLog, "Detalhado: não", 536, 726, 116, 28)
+	createIconButton(idDetailedLog, "Ver detalhes", 522, 726, 130, 28)
 	createIconButton(idClearLog, "Limpar", 662, 726, 102, 28)
 	createIconButton(idCopyLog, "Copiar", 774, 726, 110, 28)
-	createControl(0, "EDIT", "", WS_CHILD|WS_VISIBLE|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY|WS_VSCROLL|WS_BORDER, 28, 760, 864, uiLogEditHeight, idLog)
+	createControl(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY|WS_VSCROLL, 28, 760, 864, uiLogEditHeight, idLog)
 	setControlFont(idLog, monoFont)
 
 	createControl(0, "STATIC", "Status:", WS_CHILD|WS_VISIBLE, 22, 899, 45, 20, 3012)
@@ -7360,6 +7677,16 @@ func main() {
 	monoFont = createFont(-15, FW_NORMAL, "Consolas")
 	brush, _, _ := procCreateSolidBrush.Call(rgb(28, 31, 36))
 	logBrush = syscall.Handle(brush)
+	whiteBrush, _, _ := procCreateSolidBrush.Call(rgb(255, 255, 255))
+	staticBrushWhite = syscall.Handle(whiteBrush)
+	neutralBrush, _, _ := procCreateSolidBrush.Call(rgb(248, 250, 252))
+	resultBrushNeutral = syscall.Handle(neutralBrush)
+	successBrush, _, _ := procCreateSolidBrush.Call(rgb(240, 253, 244))
+	resultBrushSuccess = syscall.Handle(successBrush)
+	warningBrush, _, _ := procCreateSolidBrush.Call(rgb(255, 251, 235))
+	resultBrushWarning = syscall.Handle(warningBrush)
+	errorBrush, _, _ := procCreateSolidBrush.Call(rgb(254, 242, 242))
+	resultBrushError = syscall.Handle(errorBrush)
 
 	className := u16("FirebirdToolboxWindow")
 	wc := wndClassEx{
@@ -7447,5 +7774,10 @@ func main() {
 	}
 	if logBrush != 0 {
 		procDeleteObject.Call(uintptr(logBrush))
+	}
+	for _, brush := range []syscall.Handle{staticBrushWhite, resultBrushNeutral, resultBrushSuccess, resultBrushWarning, resultBrushError} {
+		if brush != 0 {
+			procDeleteObject.Call(uintptr(brush))
+		}
 	}
 }

@@ -1,11 +1,11 @@
-# Firebird Toolbox v1.2.20
+# Firebird Toolbox v1.2.24
 
 > Para a visão geral do repositório, build e publicação no GitHub, consulte [README.md](README.md).
 
 
 Utilitário portátil para Windows com um único executável x86/x64 para manutenção, recuperação e restauração de bancos Firebird **1.0, 1.5, 2.0, 2.1, 2.5, 3.0, 4.0 e 5.0**.
 
-A v1.2.20 mantém somente três rotinas e unifica a distribuição em um único executável x86/x64, com descoberta automática da instalação/serviço/porta na máquina onde estiver rodando:
+A v1.2.24 mantém somente três rotinas, o executável único x86/x64 e a descoberta automática da instalação/serviço/porta. Corrige a repintura dos textos da interface principal usando fundo branco sólido igual ao da janela, removendo blocos cinza sem deixar títulos, cabeçalhos ou estados anteriores sobrepostos. Preserva `Abrir pasta`, a Ajuda compacta, `Ver detalhes`/`Resumir log` e o destaque visual do resultado:
 
 1. `Corrigir banco`
 2. `Corrigir banco (avançado)`
@@ -60,7 +60,7 @@ A v1.2.5 faz uma revisão de legibilidade da tela principal sem alterar o fluxo 
 
 ## Ajuda integrada
 
-O botão `Ajuda` agora abre uma janela própria dentro do Firebird Toolbox, sem depender do Bloco de Notas, navegador ou arquivo externo. A janela possui rolagem e reúne:
+O botão `Ajuda` agora abre uma janela própria dentro do Firebird Toolbox, sem depender do Bloco de Notas, navegador ou arquivo externo. A janela foi reorganizada em tópicos navegáveis e reúne:
 
 - início rápido;
 - explicação das três rotinas;
@@ -72,7 +72,7 @@ O botão `Ajuda` agora abre uma janela própria dentro do Firebird Toolbox, sem 
 - diferença entre log resumido e detalhado;
 - boas práticas de segurança antes de colocar um banco recuperado em produção.
 
-A janela também possui os botões `Copiar ajuda` e `Fechar`. O conteúdo fica incorporado ao executável e acompanha a versão instalada.
+A janela também possui `Copiar guia completo` e `Fechar`. O conteúdo fica incorporado ao executável e acompanha a versão instalada.
 
 ## Resgate de registros (mantido na v1.2.5)
 
@@ -316,7 +316,7 @@ A versão encontrada é confirmada pelo próprio `gbak -z`. A porta é lida de `
 A distribuição oficial é gerada pelo GitHub Actions e exige Microsoft Artifact Signing. Para um build local **somente de desenvolvimento**:
 
 ```powershell
-.\tools\build.ps1 -Version '1.2.20' -AllowUnsignedDev
+.\tools\build.ps1 -Version '1.2.24' -AllowUnsignedDev
 ```
 
 Os arquivos locais sem assinatura recebem `_UNSIGNED_DEV` no nome e não devem ser distribuídos.
@@ -325,7 +325,7 @@ Para um build local com PFX confiável:
 
 ```powershell
 .\tools\build.ps1 `
-  -Version '1.2.20' `
+  -Version '1.2.24' `
   -SigningPfx 'C:\Certificados\codigo.pfx' `
   -SigningPassword 'SENHA'
 ```

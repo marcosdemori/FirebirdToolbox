@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.2.24 - 2026-08-11
+
+- Corrige a regressão visual da v1.2.23 em que textos estáticos transparentes podiam permanecer na tela e se sobrepor após repaints do Win32.
+- Substitui o `NULL_BRUSH` dos rótulos por um brush branco sólido igual ao fundo da janela, removendo os blocos cinza sem deixar rastros.
+- Mantém os cabeçalhos das seções limpos sobre a borda do groupbox e preserva o destaque colorido exclusivo do campo Resultado.
+- Adiciona teste de regressão para impedir o retorno do caminho transparente que causava títulos e estados duplicados.
+- Não altera a lógica Firebird, recuperação, conflitos, gates de saúde ou abertura de pasta da v1.2.23.
+
+## 1.2.23 - 2026-08-11
+
+- Remove os fundos cinza dos textos estáticos da interface principal, deixando rótulos e subtítulos transparentes sobre o fundo da janela.
+- Reposiciona os cabeçalhos das seções para que a borda superior do groupbox não corte o texto em certos temas/DPI do Windows.
+- Preserva a área destacada de Resultado com suas cores de sucesso, aviso e erro.
+- Mantém sem mudanças a lógica Firebird e a recuperação segura da v1.2.22.
+
+## 1.2.22 - 2026-08-11
+
+- Reorganiza a Ajuda integrada em uma janela compacta com navegação por cinco tópicos: começo rápido, rotinas, recuperação avançada, resultados/saúde e erros/segurança.
+- Move os botões da Ajuda para uma faixa inferior segura, evitando corte em resoluções/DPI onde a antiga janela deixava os controles encostados na borda.
+- Mantém o guia integral disponível em `Copiar guia completo`, sem remover a documentação técnica já existente.
+- Substitui `Detalhado: não/sim` por `Ver detalhes` e `Resumir log`, eliminando truncamento e deixando a ação mais clara.
+- Dá destaque visual ao campo Resultado com fundo e texto específicos para sucesso, aviso/parcial/conflito e erro/não apto.
+- Reequilibra o alinhamento dos botões principais sem aumentar a janela principal.
+- Adiciona regressões de layout para a Ajuda, navegação por tópicos e rótulos do log detalhado.
+- Preserva integralmente a abertura nativa de pasta e toda a lógica de recuperação, duplicidades e gates de saúde da v1.2.21.
+
+## 1.2.21 - 2026-08-11
+
+- Corrige o botão `Abrir pasta`: a abertura passa a usar `ShellExecuteW`, o shell nativo do Windows, com fallback para `explorer.exe` e erro visível caso ambos falhem.
+- O botão passa a priorizar um resultado realmente criado pela última rotina (banco restaurado, relatório ou backup) antes de usar apenas a pasta pai de um destino ainda não existente.
+- Caminhos Unicode, UNC e pastas com espaços passam a ser entregues diretamente ao shell do Windows, sem depender de parsing manual do comando.
+- Refina a interface sem alterar o fluxo Firebird: botões principais ficam mais equilibrados, o resumo de resultado ganha maior destaque tipográfico, o log recebe borda nativa mais limpa e o subtítulo deixa mais claro o foco em recuperação segura.
+- Adiciona regressões para abertura de pasta após resultado real, após relatório de recuperação e antes da primeira execução.
+- Preserva integralmente os gates de saúde, a correção de SQL Dialect 1 e o ciclo de vida do restore de referência introduzidos na v1.2.20.
+
 ## 1.2.20 - 2026-08-11
 
 - Corrige o falso bloqueio do gate de saúde em banco SQL Dialect 1: relações tradicionais como `DOCIT` passam a ser consultadas sem aspas duplas (`FROM DOCIT`), evitando o erro real `SQL -104 / Token unknown / "DOCIT"` observado no pós-recuperação.

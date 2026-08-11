@@ -1,12 +1,12 @@
-# Firebird Toolbox v1.2.20 — Ajuda rápida
+# Firebird Toolbox v1.2.24 — Ajuda rápida
 
-A v1.2.20 usa **um único executável x86/x64** e detecta o Firebird da própria máquina pelo Registry, Program Files/ProgramW6432, serviços e PATH. A porta vem de `RemoteServicePort` no `firebird.conf` e o fallback é 3050. Os nomes de serviço existentes nos BATs não são usados pela execução.
+A v1.2.24 usa **um único executável x86/x64**, detecta o Firebird da própria máquina pelo Registry, Program Files/ProgramW6432, serviços e PATH, preserva o `Abrir pasta` pelo shell nativo do Windows e corrige a repintura dos rótulos da interface para manter fundo branco limpo sem textos duplicados. A porta vem de `RemoteServicePort` no `firebird.conf` e o fallback é 3050. Os nomes de serviço existentes nos BATs não são usados pela execução.
 
 
 
 AJUDA INTEGRADA
 ----------------
-O botão Ajuda abre uma janela interna com guia rápido, descrição das rotinas, recuperação avançada, skip_data, estados de resultado, arquivos RECOVERY, erros comuns e boas práticas. A janela possui rolagem, Copiar ajuda e Fechar, sem depender de programa externo.
+O botão Ajuda abre uma janela interna com guia rápido, descrição das rotinas, recuperação avançada, skip_data, estados de resultado, arquivos RECOVERY, erros comuns e boas práticas. A janela usa tópicos navegáveis, rolagem no conteúdo e os botões Copiar guia completo e Fechar, sem depender de programa externo.
 
 
 ## Legibilidade da interface

@@ -35,7 +35,7 @@ jobs:
 
       - name: Generate Windows resources
         shell: pwsh
-        run: ./tools/prepare-resources.ps1 -Version '1.2.20'
+        run: ./tools/prepare-resources.ps1 -Version '1.2.24'
 
       - name: Vet Windows x64
         shell: pwsh
@@ -53,11 +53,11 @@ jobs:
         run: |
           $env:GOOS = 'windows'
           $env:GOARCH = 'amd64'
-          $ld = "-H=windowsgui -X main.appVersion=1.2.20"
+          $ld = "-H=windowsgui -X main.appVersion=1.2.24"
           $goArgs = @('build', '-trimpath', '-buildvcs=false', '-ldflags', $ld, '-o', 'FirebirdToolbox_ci_x64.exe', '.')
           & go @goArgs
           if ($LASTEXITCODE -ne 0) { throw "go build x64 falhou com codigo $LASTEXITCODE." }
-          ./tools/verify-windows-build.ps1 -Path ./FirebirdToolbox_ci_x64.exe -Version '1.2.20'
+          ./tools/verify-windows-build.ps1 -Path ./FirebirdToolbox_ci_x64.exe -Version '1.2.24'
           Remove-Item FirebirdToolbox_ci_x64.exe -Force
 
       - name: Compile Windows x86 tests
@@ -73,9 +73,9 @@ jobs:
         run: |
           $env:GOOS = 'windows'
           $env:GOARCH = '386'
-          $ld = "-H=windowsgui -X main.appVersion=1.2.20"
+          $ld = "-H=windowsgui -X main.appVersion=1.2.24"
           $goArgs = @('build', '-trimpath', '-buildvcs=false', '-ldflags', $ld, '-o', 'FirebirdToolbox_ci_x86_x64.exe', '.')
           & go @goArgs
           if ($LASTEXITCODE -ne 0) { throw "go build x86/x64 falhou com codigo $LASTEXITCODE." }
-          ./tools/verify-windows-build.ps1 -Path ./FirebirdToolbox_ci_x86_x64.exe -Version '1.2.20'
+          ./tools/verify-windows-build.ps1 -Path ./FirebirdToolbox_ci_x86_x64.exe -Version '1.2.24'
           Remove-Item FirebirdToolbox_ci_x86_x64.exe -Force

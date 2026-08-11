@@ -285,7 +285,7 @@ func TestMergeRecoveryStatsKeepsWorstCounts(t *testing.T) {
 }
 
 func TestProjectCreditAndVersion(t *testing.T) {
-	if appVersion != "1.2.17" {
+	if appVersion != "1.2.22" {
 		t.Fatalf("unexpected app version: %s", appVersion)
 	}
 	if appCredit != "Projeto feito por Marcos De Mori Laiola" {
@@ -317,6 +317,50 @@ func TestUILayoutReadabilityMinimums(t *testing.T) {
 	}
 	if uiSkipEditX+uiSkipEditWidth+12 > uiSkipHintX {
 		t.Fatalf("skip_data edit and help label overlap: editEnd=%d hintX=%d", uiSkipEditX+uiSkipEditWidth, uiSkipHintX)
+	}
+}
+
+func TestHelpLayoutFitsCompactWindow(t *testing.T) {
+	if uiHelpWindowWidth > 900 || uiHelpWindowHeight > 720 {
+		t.Fatalf("help window is no longer compact: %dx%d", uiHelpWindowWidth, uiHelpWindowHeight)
+	}
+	if uiHelpNavWidth < 160 || uiHelpContentWidth < 540 || uiHelpContentHeight < 360 {
+		t.Fatalf("help layout lost readable space: nav=%d content=%dx%d", uiHelpNavWidth, uiHelpContentWidth, uiHelpContentHeight)
+	}
+	if uiHelpBottomY+40 >= uiHelpWindowHeight {
+		t.Fatalf("help bottom actions can be clipped: bottomY=%d windowHeight=%d", uiHelpBottomY, uiHelpWindowHeight)
+	}
+}
+
+func TestHelpSectionsProvideScannableNavigation(t *testing.T) {
+	sections := helpSections()
+	if len(sections) != 5 {
+		t.Fatalf("unexpected help section count: %d", len(sections))
+	}
+	for _, want := range []string{"Comece por aqui", "Rotinas", "Recuperação avançada", "Resultados e saúde", "Erros e segurança"} {
+		found := false
+		for _, section := range sections {
+			if section.Title == want && strings.TrimSpace(section.Content) != "" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("help section missing or empty: %s", want)
+		}
+	}
+}
+
+func TestDetailedLogButtonUsesClearLabels(t *testing.T) {
+	data, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{`setText(idDetailedLog, "Ver detalhes")`, `setText(idDetailedLog, "Resumir log")`, `createIconButton(idDetailedLog, "Ver detalhes"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("detailed log control missing clear label %q", want)
+		}
 	}
 }
 
@@ -703,8 +747,8 @@ func TestWindowsDistributionMetadataConfig(t *testing.T) {
 	for _, want := range []string{
 		`"CompanyName": "Marcos De Mori Laiola"`,
 		`"ProductName": "Firebird Toolbox"`,
-		`"FileVersion": "1.2.17.0"`,
-		`"ProductVersion": "1.2.17"`,
+		`"FileVersion": "1.2.22.0"`,
+		`"ProductVersion": "1.2.22"`,
 		`"execution-level": "as invoker"`,
 		`"use-common-controls-v6": true`,
 	} {
@@ -1079,5 +1123,81 @@ func TestVerifiedRestoreSurvivesUntilPostRecoveryHealth(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("restore-reference lifecycle missing %q", want)
 		}
+	}
+}
+
+func TestResolveResultFolderPrefersExistingResultOverSuggestedDestination(t *testing.T) {
+	root := t.TempDir()
+	destDir := filepath.Join(root, "dest")
+	reportDir := filepath.Join(root, "recovery")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(reportDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	report := filepath.Join(reportDir, "RELATORIO_RECUPERACAO.txt")
+	if err := os.WriteFile(report, []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// O destino ainda não existe, embora a pasta pai exista. Nesse cenário o
+	// relatório real produzido pela rotina deve vencer o destino apenas sugerido.
+	dest := filepath.Join(destDir, "DBCOM50.RED")
+	if got := resolveResultFolder(dest, report); got != reportDir {
+		t.Fatalf("resolveResultFolder() = %q, want %q", got, reportDir)
+	}
+}
+
+func TestResolveResultFolderPrefersGeneratedDestinationWhenItExists(t *testing.T) {
+	root := t.TempDir()
+	destDir := filepath.Join(root, "dest")
+	reportDir := filepath.Join(root, "recovery")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(reportDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(destDir, "DBCOM50.RED")
+	if err := os.WriteFile(dest, []byte("db"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	report := filepath.Join(reportDir, "RELATORIO_RECUPERACAO.txt")
+	if err := os.WriteFile(report, []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := resolveResultFolder(dest, report); got != destDir {
+		t.Fatalf("resolveResultFolder() = %q, want %q", got, destDir)
+	}
+}
+
+func TestResolveResultFolderFallsBackToParentBeforeFirstRun(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "DBCOM50.RED")
+	if got := resolveResultFolder(dest); got != root {
+		t.Fatalf("resolveResultFolder() = %q, want %q", got, root)
+	}
+}
+
+func TestStaticLabelsUseSolidWindowBackgroundInsteadOfTransparentBrush(t *testing.T) {
+	data, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"staticBrushWhite",
+		"procIsWindowEnabled.Call(lParam)",
+		"procSetBkColor.Call(wParam, rgb(255, 255, 255))",
+		"return uintptr(staticBrushWhite)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("solid static background regression: missing %q", want)
+		}
+	}
+	if strings.Contains(text, "nullBrush, _, _ := procGetStockObject.Call(NULL_BRUSH)") {
+		t.Fatal("transparent NULL_BRUSH path reintroduced; it causes stale/duplicated labels on repaint")
 	}
 }
