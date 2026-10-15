@@ -524,6 +524,77 @@ func TestReportDoesNotClaimCleanDiagnosticWhenItNeverRan(t *testing.T) {
 	}
 }
 
+// Caso real: o gbak morreu logo depois de gravar EMAIL, mas quem quebrou foi
+// CAIXA, como o firebird.log registrou duas vezes.
+const bugcheckFirebirdLog = `MARCOS	Thu Oct 15 17:05:49 2026
+	Database: C:\\REDSIS\\CLIENTES\\CS STONE\\DBCOM_WORK.RED
+	Error: Record 2594350 has bad transaction 41437787 in table CAIXA (132)
+
+MARCOS	Thu Oct 15 17:05:49 2026
+	bugcheck during scan of table 132 (CAIXA)
+
+MARCOS	Thu Oct 15 17:05:50 2026
+	Database: C:\\REDSIS\\CLIENTES\\CS STONE\\DBCOM_WORK.RED
+	Validation aborted
+	database file appears corrupt
+	wrong page type
+	page 386932 is of wrong type (expected transaction inventory, found index B-tree)
+`
+
+const bugcheckGbakOutput = `gbak:    writing data for table EMAIL
+gbak:10000 records written
+gbak: ERROR:database file appears corrupt (C:\\REDSIS\\CLIENTES\\CS STONE\\DBCOM_WORK.RED)
+gbak: ERROR:    wrong page type
+gbak: ERROR:    page 413591 is of wrong type (expected transaction inventory, found data)
+gbak: ERROR:gds_$receive failed
+gbak:Exiting before completion due to errors
+`
+
+func TestSuspectedRelationPrefersFirebirdLogOverGbak(t *testing.T) {
+	if got := suspectedRelationFromFirebirdLog(bugcheckFirebirdLog); got != "CAIXA" {
+		t.Fatalf("o bugcheck do firebird.log deveria apontar CAIXA, veio %q", got)
+	}
+	// O log do gbak sozinho aponta a tabela errada: e esse o motivo de o
+	// firebird.log ter prioridade.
+	if got := suspectedRelationFromGbak(bugcheckGbakOutput); got != "EMAIL" {
+		t.Fatalf("o log do gbak deveria apontar EMAIL, veio %q", got)
+	}
+	if got := suspectedRelationFromFirebirdLog("Validation started\nValidation finished"); got != "" {
+		t.Fatalf("log sem bugcheck nao pode gerar suspeita: %q", got)
+	}
+}
+
+func TestSuspectedRelationFallsBackToGbakWithoutBugcheck(t *testing.T) {
+	logText := "Database: C:\\DADOS\\X.FDB\n\tValidation started\n"
+	if got := suspectedRelationFromFirebirdLog(logText); got != "" {
+		t.Fatalf("sem bugcheck o firebird.log nao pode nomear relacao: %q", got)
+	}
+	if got := suspectedRelationFromGbak(bugcheckGbakOutput); got == "" {
+		t.Fatal("sem sinal no firebird.log o log do gbak ainda precisa servir de fallback")
+	}
+}
+
+func TestIndexCorruptionNeedsIndexOnTheExpectedSide(t *testing.T) {
+	// Pagina de indice realmente danificada: o indice esta no lado esperado.
+	if !gbakLooksLikeIndexCorruption("page 213030 is of wrong type (expected index B-tree, found blob)") {
+		t.Fatal("corrupcao real de indice precisa continuar sendo detectada")
+	}
+	if !gbakLooksLikeIndexCorruption("gbak: ERROR: index page errors") {
+		t.Fatal("index page errors precisa continuar sendo detectado")
+	}
+	// Caso real: a pagina danificada e de transaction inventory. O indice so
+	// aparece como invasor, ou nas linhas "writing index ..." do proprio gbak.
+	if gbakLooksLikeIndexCorruption(bugcheckGbakOutput) {
+		t.Fatal("falha de transaction inventory nao pode ser classificada como corrupcao de indice")
+	}
+	if gbakLooksLikeIndexCorruption("page 386932 is of wrong type (expected transaction inventory, found index B-tree)") {
+		t.Fatal("indice encontrado no lugar errado nao significa indice danificado")
+	}
+	if gbakLooksLikeIndexCorruption("gbak:    writing index RDB$PRIMARY214\ngbak: ERROR:    wrong page type") {
+		t.Fatal("a mencao rotineira a \"writing index\" nao pode virar suspeita de indice")
+	}
+}
+
 func TestSectionHeadersDoNotHideGroupboxTopBorder(t *testing.T) {
 	limits := map[int]int32{
 		idSectionRoutine:  170,

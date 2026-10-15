@@ -4152,6 +4152,28 @@ func plausibleRelationName(name string) bool {
 	return true
 }
 
+// suspectedRelationFromFirebirdLog le o sinal forte da falha. Quando o motor
+// sofre bugcheck ele registra no firebird.log a tabela que estava varrendo,
+// enquanto a saida do gbak so mostra a ultima tabela que ele chegou a escrever
+// antes de morrer - que costuma ser outra. Caso real: o gbak parou logo depois
+// de EMAIL, mas o firebird.log acusava "bugcheck during scan of table 132
+// (CAIXA)", e o -skip_data automatico foi disparado contra a tabela errada.
+func suspectedRelationFromFirebirdLog(logText string) string {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)bugcheck during scan of table\s+\d+\s*\(([^)]+)\)`),
+		regexp.MustCompile(`(?i)has bad transaction\s+\d+\s+in table\s+("[^"]+"|[A-Za-z0-9_$]+)`),
+	}
+	for _, re := range patterns {
+		matches := re.FindAllStringSubmatch(logText, -1)
+		for i := len(matches) - 1; i >= 0; i-- {
+			if name := normalizeRelationName(matches[i][1]); plausibleRelationName(name) {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
 func suspectedRelationFromGbak(output string) string {
 	lines := strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n")
 	patterns := []*regexp.Regexp{
@@ -4248,10 +4270,19 @@ func relevantGbakFailureLines(output string, maxLines int) string {
 	return strings.Join(selected, "\n")
 }
 
+// gbakLooksLikeIndexCorruption exige que a pagina quebrada seja de indice, ou
+// seja, que o indice esteja no lado ESPERADO da mensagem do Firebird. A versao
+// anterior aceitava "wrong page type" junto de qualquer ocorrencia de "index"
+// na saida, e o gbak escreve "writing index ..." o tempo todo: na pratica
+// qualquer falha de tipo de pagina virava suspeita de indice. Caso real: o erro
+// era "page 413591 is of wrong type (expected transaction inventory, found
+// data)" e o operador recebia um aviso mandando procurar indice para desativar.
+// "found index B-tree" tambem nao serve: ali o indice e o invasor, nao a
+// pagina danificada.
 func gbakLooksLikeIndexCorruption(output string) bool {
 	lower := strings.ToLower(output)
 	return strings.Contains(lower, "expected index b-tree") ||
-		(strings.Contains(lower, "wrong page type") && strings.Contains(lower, "index")) ||
+		strings.Contains(lower, "expected index") ||
 		strings.Contains(lower, "index page errors")
 }
 
@@ -5378,6 +5409,7 @@ type recoveryReport struct {
 	LimboCount                int
 	SkipData                  string
 	SuspectedRelation         string
+	SuspectedRelationSource   string
 	IndexRescueAttempted      bool
 	IndexesDisabled           []string
 	RowRescueAttempted        bool
@@ -5577,7 +5609,11 @@ func writeRecoveryReport(r recoveryReport) error {
 	if r.BackupFailureDetails != "" || r.SuspectedRelation != "" {
 		b.WriteString("\r\nFALHA DO BACKUP / DIAGNÓSTICO DO GBAK\r\n")
 		if r.SuspectedRelation != "" {
-			b.WriteString("Possível relação afetada: " + r.SuspectedRelation + "\r\n")
+			line := "Possível relação afetada: " + r.SuspectedRelation
+			if r.SuspectedRelationSource != "" {
+				line += " (identificada pelo " + r.SuspectedRelationSource + ")"
+			}
+			b.WriteString(line + "\r\n")
 		}
 		if r.BackupFailureDetails != "" {
 			b.WriteString(strings.ReplaceAll(r.BackupFailureDetails, "\n", "\r\n") + "\r\n")
@@ -7379,9 +7415,18 @@ func runAdvancedRecovery(ctx context.Context, c workflowConfig) (retErr error) {
 
 	if backupErr != nil || !fileExists(backup) {
 		report.BackupFailureDetails = relevantGbakFailureLines(backupOutput, 48)
-		report.SuspectedRelation = suspectedRelationFromGbak(backupOutput)
-		if report.SuspectedRelation != "" {
-			appendLog("Possível relação afetada pelo erro do gbak: " + report.SuspectedRelation)
+		// O firebird.log tem prioridade: ele nomeia a tabela que o motor estava
+		// varrendo quando quebrou. A saida do gbak so indica onde ele parou.
+		report.SuspectedRelation = suspectedRelationFromFirebirdLog(collectFirebirdLogDelta(logSnapshot))
+		report.SuspectedRelationSource = "firebird.log"
+		if report.SuspectedRelation == "" {
+			report.SuspectedRelation = suspectedRelationFromGbak(backupOutput)
+			report.SuspectedRelationSource = "log do gbak"
+		}
+		if report.SuspectedRelation == "" {
+			report.SuspectedRelationSource = ""
+		} else {
+			appendLog("Possível relação afetada: " + report.SuspectedRelation + " (identificada pelo " + report.SuspectedRelationSource + ")")
 		}
 		if report.BackupFailureDetails != "" && !detailedLog {
 			appendLog("Falha do backup - mensagens relevantes:")
