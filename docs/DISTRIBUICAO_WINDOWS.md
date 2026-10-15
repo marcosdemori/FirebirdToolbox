@@ -130,7 +130,7 @@ git tag -a v<versão> -m "Firebird Toolbox v<versão>"
 git push origin v<versão>
 ```
 
-A Release só é criada se o build e os testes passarem, os EXEs forem assinados, o Authenticode estiver `Valid`, houver timestamp e os hashes forem gerados depois da assinatura. O GitHub também gera atestações de proveniência. O `PUBLICAR_GITHUB.bat` faz esse fluxo de forma guiada, pedindo confirmação antes do commit e do push.
+A Release só é criada se o build e os testes passarem, os EXEs forem assinados, o Authenticode estiver `Valid`, houver timestamp e os hashes forem gerados depois da assinatura. O GitHub também gera atestações de proveniência. O `FIREBIRD_TOOLBOX.bat` faz esse fluxo de forma guiada na opção `2`, pedindo confirmação antes do commit e do push; a opção `1` gera o executável em `dist/` e a `3` encadeia as duas.
 
 ## Mudanças no comportamento do aplicativo
 

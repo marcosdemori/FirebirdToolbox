@@ -79,7 +79,7 @@ O arquivo recebe `_UNSIGNED_DEV` no nome. Para distribuição pública use a Rel
 
 ### Tudo sai em `dist/`
 
-`tools\build.ps1` é a única forma suportada de gerar o executável. Ele recria `dist/` do zero a cada execução e grava lá o aplicativo, os binários de teste, o `SHA256.txt` e o `SIGNATURE_STATUS.txt`. A raiz do repositório não recebe executável nem hash: `dist/`, `*.exe` e `*_SHA256.txt` estão no `.gitignore`, e um `.exe` solto na raiz é resíduo de um `go build` manual e deve ser apagado.
+`tools\build.ps1` é a única forma suportada de gerar o executável, seja chamado direto ou pela opção `1` do `FIREBIRD_TOOLBOX.bat`. Ele recria `dist/` do zero a cada execução e grava lá o aplicativo, os binários de teste, o `SHA256.txt` e o `SIGNATURE_STATUS.txt`. A raiz do repositório não recebe executável nem hash: `dist/`, `*.exe` e `*_SHA256.txt` estão no `.gitignore`, e um `.exe` solto na raiz é resíduo de um `go build` manual e deve ser apagado.
 
 Se precisar compilar à mão para depurar, direcione a saída para `dist/`:
 
@@ -98,13 +98,13 @@ A versão aparece em cinco lugares e todos precisam concordar, senão a CI repro
 2. `winres/winres.json` (`file_version`, `product_version`, `FileVersion`, `ProductVersion`);
 3. o parâmetro `-Version` em `tools/build.ps1`, `tools/prepare-resources.ps1` e `tools/verify-windows-build.ps1`;
 4. `.github/workflows/ci.yml`;
-5. `PUBLICAR_GITHUB.bat`.
+5. `FIREBIRD_TOOLBOX.bat`.
 
 Acrescente a entrada no `CHANGELOG.md`, atualize `docs/LEIA-ME.md` e `docs/MANUAL.md` e rode o build. O teste `TestProjectCreditAndVersion` falha se `appVersion` ficar para trás, e `TestWindowsDistributionMetadataConfig` falha se o `winres.json` divergir.
 
 ## Publicar no GitHub
 
-Execute `PUBLICAR_GITHUB.bat` para um fluxo guiado com confirmação antes do commit e do push. O passo a passo manual, com a ordem obrigatória entre CI verde, assinatura configurada e criação da tag, está em [docs/DISTRIBUICAO_WINDOWS.md](docs/DISTRIBUICAO_WINDOWS.md).
+Execute `FIREBIRD_TOOLBOX.bat` e escolha a opção `2` para um fluxo guiado com confirmação antes do commit e do push. A opção `1` apenas gera o executável em `dist/` e a `3` faz as duas coisas em sequência. O passo a passo manual, com a ordem obrigatória entre CI verde, assinatura configurada e criação da tag, está em [docs/DISTRIBUICAO_WINDOWS.md](docs/DISTRIBUICAO_WINDOWS.md).
 
 ## GitHub Actions
 
@@ -134,7 +134,7 @@ A CI não envia artifacts intermediários, evitando consumo desnecessário de Ac
 ├── tools/build.ps1         # build local único x86/x64
 ├── tools/sign-windows.ps1  # assinatura PFX apenas para build local
 ├── tools/defender-preflight.ps1 # preflight Defender da Release
-├── PUBLICAR_GITHUB.bat     # publicacao guiada opcional
+├── FIREBIRD_TOOLBOX.bat    # menu: gerar o .exe em dist/ e publicar
 ├── main.go                 # aplicação Win32
 ├── main_test.go            # regressões
 ├── go.mod
