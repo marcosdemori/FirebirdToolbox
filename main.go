@@ -3572,8 +3572,17 @@ func runPostRecoveryHealth(ctx context.Context, c workflowConfig, dbPath, refere
 		setLastHeader(h.Header)
 	}
 
+	// Um banco restaurado com -n perdeu as FOREIGN KEY e as constraints CHECK.
+	// Ele pode passar em todos os gates estruturais e ainda assim aceitar dados
+	// invalidos, entao nunca recebe APTO PARA PRODUCAO.
+	if report.NoValidityRestore {
+		appendHealthWarning(&h, "banco restaurado com -n (-no_validity): as FOREIGN KEY e as constraints CHECK não existem e precisam ser recriadas manualmente após sanear as linhas órfãs")
+	}
+
 	if len(h.CriticalIssues) > 0 {
 		h.Readiness = "NÃO APTO PARA PRODUÇÃO"
+	} else if report.NoValidityRestore {
+		h.Readiness = "RESTAURADO SEM CONSTRAINTS (-n); RECRIAR FOREIGN KEY ANTES DE USAR"
 	} else if report.PartialRecovery {
 		h.Readiness = "ESTRUTURALMENTE SAUDÁVEL; REVISÃO FUNCIONAL OBRIGATÓRIA"
 	} else if c.TargetVersion != "" {
@@ -3590,7 +3599,7 @@ func runPostRecoveryHealth(ctx context.Context, c workflowConfig, dbPath, refere
 	return h, nil
 }
 
-func restoreBackup(ctx context.Context, c workflowConfig, backup string) error {
+func restoreBackup(ctx context.Context, c workflowConfig, backup string, noValidity bool) error {
 	version := c.TargetVersion
 	gbak := firebirdExe(c.FbTarget, version, "gbak.exe")
 
@@ -3614,6 +3623,12 @@ func restoreBackup(ctx context.Context, c workflowConfig, backup string) error {
 		restoreAction = "-rep"
 	}
 	restoreFlags := []string{restoreAction, "-v"}
+	// Se o restore de teste so passou com -n, o destino final tem de usar o
+	// mesmo -n, senao ele falha exatamente na mesma FOREIGN KEY.
+	if noValidity {
+		restoreFlags = append(restoreFlags, "-n")
+		appendLog("Restaurando o destino final com -n (-no_validity): o banco ficará SEM FOREIGN KEY e SEM constraints CHECK.")
+	}
 	var args []string
 	if useService {
 		args = append(restoreFlags, "-se", serviceManager(targetPort), "-user", c.User, "-password", c.Password, backup, c.Dest)
@@ -4113,6 +4128,19 @@ func gbakLooksLikeIndexCorruption(output string) bool {
 		strings.Contains(lower, "index page errors")
 }
 
+// gbakLooksLikeOrphanForeignKey identifica o restore que falhou ao recriar uma
+// FOREIGN KEY porque as linhas-pai se perderam nas paginas corrompidas. O
+// -one_at_a_time nao resolve esse caso: ele isola erros nos dados, nao na
+// criacao das constraints. A saida tipica do gbak e:
+//
+//	gbak: ERROR:action cancelled by trigger (2) to preserve data integrity
+//	gbak: ERROR:    Non-existent PRIMARY or UNIQUE KEY specified for FOREIGN KEY.
+func gbakLooksLikeOrphanForeignKey(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "non-existent primary or unique key specified for foreign key") ||
+		(strings.Contains(lower, "action cancelled by trigger") && strings.Contains(lower, "preserve data integrity"))
+}
+
 func metadataBackupPath(backup string) string {
 	ext := filepath.Ext(backup)
 	base := strings.TrimSuffix(backup, ext)
@@ -4406,7 +4434,7 @@ func restoreBackupToPath(ctx context.Context, c workflowConfig, backup, dest, la
 		resolved = p
 	}
 	_ = os.Remove(dest)
-	_, err := runRecoveryCapture(ctx, label, gbak, restoreTestArgs(version, resolved, c.User, c.Password, backup, dest, false)...)
+	_, err := runRecoveryCapture(ctx, label, gbak, restoreTestArgs(version, resolved, c.User, c.Password, backup, dest, false, false)...)
 	if err != nil {
 		return err
 	}
@@ -4819,6 +4847,8 @@ type recoveryReport struct {
 	DuplicateRepairApplied    bool
 	DuplicateRowsRemoved      int64
 	DuplicateConflicts        []restoreDuplicateConflict
+	OrphanFKDetected          bool
+	NoValidityRestore         bool
 	CleanRebuildAttempted     bool
 	CleanRebuildRelation      string
 	CleanRebuildStage         string
@@ -5132,10 +5162,17 @@ func testRestoreEngine(c workflowConfig) (version, root, port string) {
 	return c.SourceVersion, c.FbSource, c.SourcePort
 }
 
-func restoreTestArgs(version, port, user, password, backup, dest string, oneAtATime bool) []string {
+// restoreTestArgs monta a linha do gbak de restauracao. noValidity acrescenta
+// -n (-no_validity), que restaura sem recriar as constraints de validade e as
+// FOREIGN KEY. E destrutivo nos metadados do banco restaurado: as constraints
+// precisam ser recriadas a mao depois de sanear as linhas orfas.
+func restoreTestArgs(version, port, user, password, backup, dest string, oneAtATime, noValidity bool) []string {
 	flags := []string{"-c", "-v"}
 	if oneAtATime {
 		flags = append(flags, "-one_at_a_time")
+	}
+	if noValidity {
+		flags = append(flags, "-n")
 	}
 	if supportsServiceManagerRestore(version) {
 		return append(flags, "-se", serviceManager(port), "-user", user, "-password", password, backup, dest)
@@ -6363,9 +6400,13 @@ func repairRestoreDuplicateConflicts(ctx context.Context, c workflowConfig, back
 type restoreTestResult struct {
 	Verified bool
 	Partial  bool
-	Path     string
-	Backup   string
-	Header   databaseHeader
+	// NoValidity marca o restore que so passou com -n, ou seja, sem as
+	// constraints de validade e as FOREIGN KEY. O banco nao e equivalente ao
+	// original e nunca pode ser liberado para producao sem revisao manual.
+	NoValidity bool
+	Path       string
+	Backup     string
+	Header     databaseHeader
 }
 
 func verifyBackupByRestore(ctx context.Context, c workflowConfig, backup, testPath string, report *recoveryReport) (restoreTestResult, error) {
@@ -6388,7 +6429,7 @@ func verifyBackupByRestoreDepth(ctx context.Context, c workflowConfig, backup, t
 	}
 	_ = os.Remove(testPath)
 	setProgress(76, "Testando o backup...")
-	output, err := runRecoveryCapture(ctx, "Testando backup com uma restauração temporária...", gbak, restoreTestArgs(version, resolvedPort, c.User, c.Password, backup, testPath, false)...)
+	output, err := runRecoveryCapture(ctx, "Testando backup com uma restauração temporária...", gbak, restoreTestArgs(version, resolvedPort, c.User, c.Password, backup, testPath, false, false)...)
 	if err == nil && fileExists(testPath) {
 		if report != nil && len(report.IndexesDisabled) > 0 && !report.DuplicateRepairApplied {
 			if _, activeErr := runISQLScript(ctx, root, version, resolvedPort, c.User, c.Password, testPath, "Reativando índices no restore de teste...", buildAlterIndexesScript(report.IndexesDisabled, true)); activeErr != nil {
@@ -6441,13 +6482,48 @@ func verifyBackupByRestoreDepth(ctx context.Context, c workflowConfig, backup, t
 		return verifyBackupByRestoreDepth(ctx, c, repairedBackup, testPath, report, round+1)
 	}
 
+	// Falha ao recriar FOREIGN KEY: linhas-pai perdidas nas paginas corrompidas
+	// deixaram filhos apontando para PKs inexistentes. O -one_at_a_time nao
+	// resolve isso, entao tentamos -n antes dele.
+	if gbakLooksLikeOrphanForeignKey(output) {
+		report.OrphanFKDetected = true
+		appendLog("Restore falhou ao recriar uma FOREIGN KEY: há linhas órfãs apontando para chaves que se perderam na corrupção.")
+		report.warning("Restore detectou integridade referencial quebrada; -one_at_a_time não resolve porque a falha é na criação da constraint, não nos dados")
+		if messageBox("Integridade referencial quebrada", "O restore falhou ao recriar uma FOREIGN KEY:\n\nNon-existent PRIMARY or UNIQUE KEY specified for FOREIGN KEY\n\nOs registros perdidos na corrupção eram linhas-pai, e os filhos sobreviveram apontando para chaves que não existem mais.\n\nDeseja tentar o restore com -n (-no_validity)?\n\nATENÇÃO: o banco restaurado ficará SEM as FOREIGN KEY e SEM as constraints CHECK. Elas terão de ser recriadas manualmente depois de sanear as linhas órfãs. Extraia o DDL original antes (isql -x) ou a definição das constraints será perdida.", MB_YESNO|MB_ICONWARNING) == IDYES {
+			_ = os.Remove(testPath)
+			appendLog("Tentando restore sem constraints de validade (-n)...")
+			nvOutput, nvErr := runRecoveryCapture(ctx, "Restore sem constraints de validade (-n)...", gbak, restoreTestArgs(version, resolvedPort, c.User, c.Password, backup, testPath, false, true)...)
+			if nvErr == nil && fileExists(testPath) {
+				report.NoValidityRestore = true
+				report.PartialRecovery = true
+				report.action("Restore de teste concluído com -n (-no_validity): banco restaurado SEM FOREIGN KEY e SEM constraints CHECK")
+				report.warning("O banco restaurado não possui as constraints originais; recrie-as manualmente após remover ou corrigir as linhas órfãs")
+				result := restoreTestResult{Verified: true, NoValidity: true, Path: testPath, Backup: backup}
+				gstat := firebirdExe(root, version, "gstat.exe")
+				if fileExists(gstat) {
+					headerOutput, headerErr := runCommandCapture(ctx, gstat, "-h", testPath)
+					if headerErr == nil {
+						result.Header = parseDatabaseHeader(headerOutput)
+					}
+				}
+				report.TestRestore = testPath
+				return result, nil
+			}
+			if nvOutput != "" && !detailedLog {
+				appendLog("O restore com -n também falhou. Últimas mensagens:")
+				appendLog(tailText(nvOutput, 12))
+			}
+			report.warning("O restore com -n não concluiu; a corrupção vai além da integridade referencial")
+		}
+	}
+
 	_ = os.Remove(testPath)
 	if messageBox("Restore de teste falhou", "O backup foi criado, mas a restauração de teste falhou.\n\nDeseja tentar o modo de recuperação parcial (-one_at_a_time)?\n\nEsse modo restaura cada tabela separadamente e pode deixar um banco incompleto para resgate manual.", MB_YESNO|MB_ICONWARNING) != IDYES {
 		return restoreTestResult{}, fmt.Errorf("backup criado, mas não passou no restore de teste")
 	}
 
 	appendLog("Tentando restore parcial, uma tabela por vez...")
-	partialOutput, partialErr := runRecoveryCapture(ctx, "Restore parcial (-one_at_a_time)...", gbak, restoreTestArgs(version, resolvedPort, c.User, c.Password, backup, testPath, true)...)
+	partialOutput, partialErr := runRecoveryCapture(ctx, "Restore parcial (-one_at_a_time)...", gbak, restoreTestArgs(version, resolvedPort, c.User, c.Password, backup, testPath, true, false)...)
 	if partialErr == nil && fileExists(testPath) {
 		report.action("Restore de teste com -one_at_a_time concluiu sem erro")
 		result := restoreTestResult{Verified: true, Path: testPath, Backup: backup}
@@ -6898,7 +6974,7 @@ func runAdvancedRecovery(ctx context.Context, c workflowConfig) (retErr error) {
 			}
 		}
 		setProgress(90, "Restaurando destino final...")
-		if err := restoreBackup(ctx, c, backup); err != nil {
+		if err := restoreBackup(ctx, c, backup, report.NoValidityRestore); err != nil {
 			if report.PartialRecovery {
 				report.FinalState = "BACKUP PARCIAL VERIFICADO; FALHA NA RESTAURAÇÃO FINAL"
 			} else {
@@ -6984,7 +7060,9 @@ func runAdvancedRecovery(ctx context.Context, c workflowConfig) (retErr error) {
 	}
 	report.action("Pós-recuperação aprovado: banco acessível, sweep final concluído, validação estrutural sem corrupção e nenhum índice/PK/UNIQUE inativo")
 	if c.TargetVersion != "" {
-		if report.PartialRecovery {
+		if report.NoValidityRestore {
+			report.FinalState += "; RESTAURADO SEM CONSTRAINTS (-n); RECRIAR FOREIGN KEY ANTES DE USAR"
+		} else if report.PartialRecovery {
 			report.FinalState += "; ESTRUTURALMENTE SAUDÁVEL; REVISÃO FUNCIONAL OBRIGATÓRIA"
 		} else {
 			report.FinalState += "; APTO PARA PRODUÇÃO"
@@ -7075,7 +7153,7 @@ func runRepair(ctx context.Context, c workflowConfig, advanced bool) error {
 			return nil
 		}
 	}
-	return restoreBackup(ctx, c, backup)
+	return restoreBackup(ctx, c, backup, false)
 }
 
 func runRestoreOnly(ctx context.Context, c workflowConfig) error {
@@ -7087,7 +7165,7 @@ func runRestoreOnly(ctx context.Context, c workflowConfig) error {
 			return errors.New("restauração cancelada pelo usuário")
 		}
 	}
-	return restoreBackup(ctx, c, c.Source)
+	return restoreBackup(ctx, c, c.Source, false)
 }
 
 func executeWorkflow() {

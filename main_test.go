@@ -235,9 +235,35 @@ func TestAdvancedBackupArgsDoesNotUseSkipDataBeforeFirebird3(t *testing.T) {
 }
 
 func TestRestoreTestArgsOneAtATime(t *testing.T) {
-	args := restoreTestArgs("5.0", "3055", "SYSDBA", "secret", "backup", "dest", true)
-	if !strings.Contains(strings.Join(args, " "), "-one_at_a_time") {
+	args := restoreTestArgs("5.0", "3055", "SYSDBA", "secret", "backup", "dest", true, false)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-one_at_a_time") {
 		t.Fatalf("restore test args must include -one_at_a_time: %v", args)
+	}
+	if strings.Contains(joined, " -n ") {
+		t.Fatalf("restore test args must not drop constraints unless asked: %v", args)
+	}
+}
+
+func TestRestoreTestArgsNoValidity(t *testing.T) {
+	args := restoreTestArgs("5.0", "3055", "SYSDBA", "secret", "backup", "dest", false, true)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, " -n ") {
+		t.Fatalf("restore test args must include -n when no_validity is requested: %v", args)
+	}
+	if strings.Contains(joined, "-one_at_a_time") {
+		t.Fatalf("-n must not imply -one_at_a_time: %v", args)
+	}
+}
+
+func TestGbakLooksLikeOrphanForeignKey(t *testing.T) {
+	output := "gbak: ERROR:action cancelled by trigger (2) to preserve data integrity\n" +
+		"gbak: ERROR:    Non-existent PRIMARY or UNIQUE KEY specified for FOREIGN KEY."
+	if !gbakLooksLikeOrphanForeignKey(output) {
+		t.Fatal("restore failure on foreign key recreation must be detected")
+	}
+	if gbakLooksLikeOrphanForeignKey("gbak: ERROR:    expected index B-tree") {
+		t.Fatal("index corruption must not be reported as broken referential integrity")
 	}
 }
 
