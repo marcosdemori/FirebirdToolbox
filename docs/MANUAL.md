@@ -1,11 +1,13 @@
-# Firebird Toolbox v1.2.31
+# Firebird Toolbox v1.2.32
 
 > Para a visão geral do repositório, build e publicação no GitHub, consulte [README.md](README.md).
 
 
 Utilitário portátil para Windows com um único executável x86/x64 para manutenção, recuperação e restauração de bancos Firebird **1.0, 1.5, 2.0, 2.1, 2.5, 3.0, 4.0 e 5.0**.
 
-A v1.2.31 mantém somente três rotinas, preserva a seção Executar em duas linhas e o ícone oficial da janela/barra de tarefas. Nesta revisão, `Abrir relatório` e `Localizar banco` recebem destaque visual apenas quando estão habilitados, e os cabeçalhos ficam totalmente abaixo da borda superior contínua dos blocos, eliminando a interrupção visual do traço: `Manutenção / conversão`, `Recuperar banco corrompido` e `Somente restaurar`. Também preserva a pré-validação operacional antes de iniciar gfix/gbak: arquivo, versão real das ferramentas, porta Firebird, permissão de escrita e espaço livre são conferidos antecipadamente. A execução mostra fases, o cancelamento informa que aguarda encerramento seguro, e ao final ficam disponíveis atalhos explícitos para Localizar banco, Abrir relatório e Abrir pasta. Preferências não sensíveis são restauradas entre sessões; senha não é gravada. O acabamento da v1.2.24 permanece:
+A v1.2.32 acrescenta o tratamento da integridade referencial quebrada no restore: quando os registros perdidos na corrupção eram linhas-pai e o `gbak` recusa recriar a `FOREIGN KEY`, o utilitário extrai o DDL das constraints para `CONSTRAINTS_ORIGINAIS.sql`, tenta o restore com `-n` (`-no_validity`) e grava em `LINHAS_ORFAS.sql` as consultas que listam os filhos sem pai. O banco resultante não tem `FOREIGN KEY` nem constraints `CHECK` e nunca recebe `APTO PARA PRODUÇÃO`.
+
+A versão mantém somente três rotinas, preserva a seção Executar em duas linhas e o ícone oficial da janela/barra de tarefas. `Abrir relatório` e `Localizar banco` recebem destaque visual apenas quando estão habilitados, e os cabeçalhos ficam totalmente abaixo da borda superior contínua dos blocos, eliminando a interrupção visual do traço: `Manutenção / conversão`, `Recuperar banco corrompido` e `Somente restaurar`. Também preserva a pré-validação operacional antes de iniciar gfix/gbak: arquivo, versão real das ferramentas, porta Firebird, permissão de escrita e espaço livre são conferidos antecipadamente. A execução mostra fases, o cancelamento informa que aguarda encerramento seguro, e ao final ficam disponíveis atalhos explícitos para Localizar banco, Abrir relatório e Abrir pasta. Preferências não sensíveis são restauradas entre sessões; senha não é gravada. O acabamento da v1.2.24 permanece:
 
 1. `Manutenção / conversão`
 2. `Recuperar banco corrompido`
@@ -316,7 +318,7 @@ A versão encontrada é confirmada pelo próprio `gbak -z`. A porta é lida de `
 A distribuição oficial é gerada pelo GitHub Actions e exige Microsoft Artifact Signing. Para um build local **somente de desenvolvimento**:
 
 ```powershell
-.\tools\build.ps1 -Version '1.2.31' -AllowUnsignedDev
+.\tools\build.ps1 -Version '1.2.32' -AllowUnsignedDev
 ```
 
 Os arquivos locais sem assinatura recebem `_UNSIGNED_DEV` no nome e não devem ser distribuídos.
@@ -325,7 +327,7 @@ Para um build local com PFX confiável:
 
 ```powershell
 .\tools\build.ps1 `
-  -Version '1.2.31' `
+  -Version '1.2.32' `
   -SigningPfx 'C:\Certificados\codigo.pfx' `
   -SigningPassword 'SENHA'
 ```

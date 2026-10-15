@@ -162,7 +162,8 @@ jobs:
           New-Item -ItemType Directory -Path $bundle -Force | Out-Null
           Copy-Item "dist/FirebirdToolbox_${tag}_x86_x64.exe" $bundle
           Copy-Item "dist/SIGNATURE_STATUS.txt" $bundle
-          Copy-Item README.md, CHANGELOG.md, LEIA-ME.md, LICENSE, SECURITY.md $bundle
+          Copy-Item README.md, CHANGELOG.md, LICENSE, SECURITY.md $bundle
+          Copy-Item docs/LEIA-ME.md, docs/MANUAL.md $bundle
           Compress-Archive -Path "$bundle/*" -DestinationPath "dist/FirebirdToolbox_${tag}_completo.zip" -Force
           Remove-Item $bundle -Recurse -Force
 

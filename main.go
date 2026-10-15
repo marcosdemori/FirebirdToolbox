@@ -37,7 +37,7 @@ var appCredit = "Feito por Marcos De Mori Laiola"
 // que originou o utilitario. A v1.2.31 executa gfix/gbak diretamente para manter
 // todo o log dentro da interface e permitir combinar versoes de origem/destino.
 //
-//go:embed scripts/*.bat LEIA-ME.md assets/*.ico
+//go:embed scripts/*.bat docs/LEIA-ME.md assets/*.ico
 var embeddedFiles embed.FS
 
 const (
@@ -7965,7 +7965,7 @@ Resumir log
 - Um backup só deve ser considerado confiável depois de um restore de teste aprovado.
 
 11. ONDE ENCONTRAR MAIS DETALHES
-Use o botão Copiar guia completo para copiar este guia. Os arquivos LEIA-ME.md e README_FirebirdToolbox.md incluídos no pacote também documentam o funcionamento do utilitário.
+Use o botão Copiar guia completo para copiar este guia. Os arquivos docs/LEIA-ME.md e docs/MANUAL.md incluídos no pacote também documentam o funcionamento do utilitário.
 
 Firebird Toolbox v` + appVersion + `
 ` + appCredit)
@@ -8079,7 +8079,7 @@ BOAS PRÁTICAS
 - Um backup só é confiável depois de restore de teste aprovado.
 - Em recuperação parcial, confira as relações, chaves e dependências citadas no relatório.
 
-Para o guia integral, use "Copiar guia completo". Os arquivos LEIA-ME.md e README_FirebirdToolbox.md do pacote também documentam o utilitário.`),
+Para o guia integral, use "Copiar guia completo". Os arquivos docs/LEIA-ME.md e docs/MANUAL.md do pacote também documentam o utilitário.`),
 		},
 	}
 }

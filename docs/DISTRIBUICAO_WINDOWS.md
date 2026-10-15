@@ -2,7 +2,7 @@
 
 ## Objetivo da v1.2.12
 
-> **v1.2.31:** mantém o executável único x86/x64 e a descoberta portátil do Firebird; além do `RT_GROUP_ICON` no arquivo, carrega o ícone oficial na classe Win32 antes de mostrar a janela, evitando o ícone genérico na barra de tarefas. Permanecem o layout em duas linhas, a pré-validação, a recuperação protegida e a política de assinatura oficial.
+> **v1.2.32:** mantém o executável único x86/x64, a descoberta portátil do Firebird e o `RT_GROUP_ICON` carregado na classe Win32 antes de mostrar a janela. Permanecem o layout em duas linhas, a pré-validação, a recuperação protegida e a política de assinatura oficial. O build local sempre grava em `dist/`, nunca na raiz do repositório.
 
 
 A v1.2.12 endurece o executável e a cadeia de distribuição em dois níveis:
@@ -21,7 +21,7 @@ Em **Propriedades > Detalhes** do EXE oficial:
 - Produto: `Firebird Toolbox`
 - Empresa/desenvolvedor: `Marcos De Mori Laiola`
 - Descrição: `Firebird Toolbox - manutenção e recuperação Firebird`
-- Versão atual: `1.2.31`
+- Versão atual: `1.2.32`
 - Copyright: `© 2026 Marcos De Mori Laiola. Todos os direitos reservados.`
 
 Os recursos são definidos em `winres/winres.json` e gerados por `go-winres v0.3.3`.
@@ -85,7 +85,7 @@ O endpoint deve corresponder à região da conta do Artifact Signing.
 Build local sem assinatura é permitido apenas de forma explícita para desenvolvimento:
 
 ```powershell
-.\tools\build.ps1 -Version "1.2.31" -AllowUnsignedDev
+.\tools\build.ps1 -Version "1.2.32" -AllowUnsignedDev
 ```
 
 Os arquivos recebem `_UNSIGNED_DEV` no nome e `SIGNATURE_STATUS.txt` informa **NAO DISTRIBUIR**.
@@ -94,12 +94,43 @@ Para um build local assinado com um certificado PFX confiável:
 
 ```powershell
 .\tools\build.ps1 `
-  -Version "1.2.31" `
+  -Version "1.2.32" `
   -SigningPfx "C:\Certificados\codigo.pfx" `
   -SigningPassword "SENHA_DO_CERTIFICADO"
 ```
 
 O PFX é apenas uma alternativa local. As Releases do GitHub usam Microsoft Artifact Signing.
+
+### Onde o build grava
+
+Todo build grava exclusivamente em `dist/`, que é recriada do zero a cada execução e está no `.gitignore`. A raiz do repositório nunca recebe executável, `SHA256.txt` ou qualquer outro artefato de build. Após `tools\build.ps1`, a pasta contém:
+
+| Arquivo | Conteúdo |
+| --- | --- |
+| `FirebirdToolbox_v<versão>_x86_x64[_UNSIGNED_DEV].exe` | o aplicativo |
+| `FirebirdToolbox_tests_x64.exe` e `FirebirdToolbox_tests_x86.exe` | binários de teste compilados |
+| `SHA256.txt` | hash de cada `FirebirdToolbox_v*.exe` |
+| `SIGNATURE_STATUS.txt` | `SIGNED` ou o aviso **NAO DISTRIBUIR** |
+
+Para subir de versão, altere `appVersion` em `main.go`, `winres/winres.json`, os parâmetros `-Version` em `tools/*.ps1` e `.github/workflows/ci.yml`, acrescente a entrada no `CHANGELOG.md` e rode o build. O teste `TestProjectCreditAndVersion` falha se `appVersion` ficar para trás.
+
+## Publicar uma versão
+
+```powershell
+git add .
+git status
+git commit -m "<tipo>(<escopo>): <descrição> v<versão>"
+git push origin main
+```
+
+Espere o workflow **CI** ficar verde. Só então, e somente com o Artifact Signing já configurado conforme a seção acima, crie a tag:
+
+```powershell
+git tag -a v<versão> -m "Firebird Toolbox v<versão>"
+git push origin v<versão>
+```
+
+A Release só é criada se o build e os testes passarem, os EXEs forem assinados, o Authenticode estiver `Valid`, houver timestamp e os hashes forem gerados depois da assinatura. O GitHub também gera atestações de proveniência. O `PUBLICAR_GITHUB.bat` faz esse fluxo de forma guiada, pedindo confirmação antes do commit e do push.
 
 ## Mudanças no comportamento do aplicativo
 
@@ -118,7 +149,7 @@ Os `.ico` continuam incorporados ao executável, mas não são mais gravados em 
 No PowerShell:
 
 ```powershell
-Get-AuthenticodeSignature ".\FirebirdToolbox_v1.2.31_x86_x64.exe" |
+Get-AuthenticodeSignature ".\FirebirdToolbox_v1.2.32_x86_x64.exe" |
   Format-List Status,StatusMessage,SignerCertificate,TimeStamperCertificate
 ```
 
@@ -127,13 +158,13 @@ A Release oficial deve mostrar `Status : Valid` e um certificado de timestamp.
 Confira também o SHA-256 publicado:
 
 ```powershell
-Get-FileHash ".\FirebirdToolbox_v1.2.31_x86_x64.exe" -Algorithm SHA256
+Get-FileHash ".\FirebirdToolbox_v1.2.32_x86_x64.exe" -Algorithm SHA256
 ```
 
 E, para repositório público, a proveniência do GitHub pode ser verificada com:
 
 ```powershell
-gh attestation verify .\FirebirdToolbox_v1.2.31_x86_x64.exe -R marcosdemori/FirebirdToolbox
+gh attestation verify .\FirebirdToolbox_v1.2.32_x86_x64.exe -R marcosdemori/FirebirdToolbox
 ```
 
 ## Quando o Defender ainda detectar um build oficial assinado

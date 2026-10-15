@@ -1,4 +1,4 @@
-# Validação visual de DPI e escala — Firebird Toolbox v1.2.31
+# Validação visual de DPI e escala — Firebird Toolbox v1.2.32
 
 A interface Win32 continua compacta e deve ser verificada em Windows real nas escalas abaixo antes da publicação final:
 
