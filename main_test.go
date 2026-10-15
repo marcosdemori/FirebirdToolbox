@@ -68,16 +68,26 @@ func TestSuccessSummaryIncludesRestoreMetadata(t *testing.T) {
 		setLastBackup(oldBackup)
 		setLastReport(oldReport)
 	}()
+	// o resumo so cita backup, destino e relatorio que existam de fato em disco
+	dir := t.TempDir()
+	backup := filepath.Join(dir, "DBCOM_20260810_101539.BAK")
+	report := filepath.Join(dir, "RELATORIO_RECUPERACAO.txt")
+	dest := filepath.Join(dir, "DBCOM50.RED")
+	for _, path := range []string{backup, report, dest} {
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatalf("could not create %s: %v", path, err)
+		}
+	}
 	setLastHeader(databaseHeader{ODS: "13.1", Dialect: "1", PageSize: "4096"})
-	setLastBackup(`C:\Backup\DBCOM_20260810_101539.BAK`)
-	setLastReport(`C:\Backup\RECOVERY_DBCOM\RELATORIO_RECUPERACAO.txt`)
+	setLastBackup(backup)
+	setLastReport(report)
 	c := workflowConfig{
 		Routine:       routines[0],
 		TargetVersion: "5.0",
-		Dest:          `C:\Dados\DBCOM50.RED`,
+		Dest:          dest,
 	}
 	text, compact := successSummary(c)
-	for _, want := range []string{"Rotina concluída com sucesso", "Firebird de destino: 5.0", "ODS: 13.1", "Dialeto: 1", `C:\Dados\DBCOM50.RED`, "RELATORIO_RECUPERACAO.txt"} {
+	for _, want := range []string{"Rotina concluída com sucesso", "Firebird de destino: 5.0", "ODS 13.1", "Dialeto 1", dest, "RELATORIO_RECUPERACAO.txt"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("summary missing %q: %s", want, text)
 		}

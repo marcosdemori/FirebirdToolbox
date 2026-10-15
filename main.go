@@ -2147,6 +2147,10 @@ func successSummary(c workflowConfig) (string, string) {
 		lines = append(lines, "✓ Rotina concluída com sucesso")
 	}
 	lines = append(lines, "", "Rotina: "+c.Routine.Name)
+	// a versao de destino identifica para qual Firebird o banco foi convertido
+	if c.TargetVersion != "" {
+		lines = append(lines, "Firebird de destino: "+c.TargetVersion)
+	}
 	if c.Routine.Kind == routineRepairAdvanced {
 		lines = append(lines, "✓ Banco original preservado")
 	}
