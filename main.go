@@ -30,7 +30,7 @@ import (
 	"unsafe"
 )
 
-var appVersion = "1.2.31"
+var appVersion = "1.2.32"
 var appCredit = "Feito por Marcos De Mori Laiola"
 
 // Os BATs originais continuam incorporados como referencia/documentacao da logica

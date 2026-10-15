@@ -1,3 +1,11 @@
+## 1.2.32 - 2026-10-15
+
+- Detecta o restore que falha ao recriar uma `FOREIGN KEY` com `Non-existent PRIMARY or UNIQUE KEY specified for FOREIGN KEY`, causado por linhas-pai perdidas nas páginas corrompidas enquanto as linhas-filhas sobreviveram.
+- Passa a tentar o restore com `-n` (`-no_validity`) antes do `-one_at_a_time`, sob confirmação do operador, porque o `-one_at_a_time` isola erros nos dados e não na criação das constraints.
+- Propaga o `-n` para a restauração do destino final, que senão falharia exatamente na mesma `FOREIGN KEY`.
+- O banco restaurado com `-n` fica sem as `FOREIGN KEY` e sem as constraints `CHECK`, então nunca recebe `APTO PARA PRODUÇÃO`: o estado final passa a ser `RESTAURADO SEM CONSTRAINTS (-n); RECRIAR FOREIGN KEY ANTES DE USAR`.
+- Preserva integralmente o layout, as rotinas, a pré-validação, a recuperação avançada e os gates de saúde da v1.2.31.
+
 ## 1.2.31 - 2026-08-11
 
 - Corrige definitivamente a linha superior dos blocos: a moldura do `BS_GROUPBOX` é elevada 8 px e sua altura cresce na mesma medida, preservando a borda inferior e deixando o traço superior contínuo acima do título.

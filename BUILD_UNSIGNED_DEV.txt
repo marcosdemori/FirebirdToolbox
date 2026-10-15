@@ -1,4 +1,4 @@
 Build local sem assinatura (UNSIGNED_DEV).
 Arquitetura: x86_x64 (PE32/386, Windows GUI, roda em Windows 32-bit e 64-bit via WOW64 quando disponível).
 Subsystem PE validado: Windows GUI (2).
-Correção v1.2.31: move a borda superior dos blocos para cima sem alterar a borda inferior, mantendo o traço contínuo acima dos títulos; destaque dos atalhos e lógica Firebird da v1.2.30 preservados.
+Correção v1.2.32: detecta o restore que falha ao recriar uma FOREIGN KEY por linhas órfãs e tenta o restore com -n (-no_validity) antes do -one_at_a_time; o destino final herda o mesmo -n e o banco resultante, sem FOREIGN KEY e sem constraints CHECK, nunca recebe APTO PARA PRODUÇÃO.

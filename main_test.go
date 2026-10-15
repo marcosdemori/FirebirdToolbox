@@ -320,7 +320,7 @@ func TestMergeRecoveryStatsKeepsWorstCounts(t *testing.T) {
 }
 
 func TestProjectCreditAndVersion(t *testing.T) {
-	if appVersion != "1.2.31" {
+	if appVersion != "1.2.32" {
 		t.Fatalf("unexpected app version: %s", appVersion)
 	}
 	if appCredit != "Feito por Marcos De Mori Laiola" {
@@ -817,8 +817,8 @@ func TestWindowsDistributionMetadataConfig(t *testing.T) {
 		`"CompanyName": "Marcos De Mori Laiola"`,
 		`"ProductName": "Firebird Toolbox"`,
 		`"FileDescription": "Firebird Toolbox - manutenção, conversão e recuperação Firebird"`,
-		`"FileVersion": "1.2.31.0"`,
-		`"ProductVersion": "1.2.31"`,
+		`"FileVersion": "1.2.32.0"`,
+		`"ProductVersion": "1.2.32"`,
 		`"execution-level": "as invoker"`,
 		`"use-common-controls-v6": true`,
 	} {
