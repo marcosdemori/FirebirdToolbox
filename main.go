@@ -253,6 +253,7 @@ const (
 	uiLocateDatabaseWidth int32 = 164
 	uiResultShortcutY     int32 = 582
 	uiLogEditHeight       int32 = 116
+	uiDescriptionWidth    int32 = 850
 	uiSectionBorderLift   int32 = 8
 
 	uiHelpWindowWidth   int32 = 850
@@ -279,7 +280,7 @@ type routineDef struct {
 
 var routines = []routineDef{
 	{"Manutenção / conversão", routineRepair, "Valida, executa sweep, gera backup e, se escolhido, converte/restaura em outra versão."},
-	{"Recuperar banco corrompido", routineRepairAdvanced, "Recuperação protegida em cópia para corrupção real: diagnóstico profundo, reparo controlado, backup de resgate, teste de restore e relatório."},
+	{"Recuperar banco corrompido", routineRepairAdvanced, "Recuperação em cópia para corrupção real: diagnóstico, reparo controlado, backup de resgate, teste de restore e relatório."},
 	{"Somente restaurar", routineRestore, "Restaura um arquivo BAK/FBK/GBK diretamente na versao escolhida."},
 }
 
@@ -8683,7 +8684,8 @@ func buildUI() {
 	addIcon("restore", 622, 104, 16)
 	createControl(0, "STATIC", "Restaurar para:", WS_CHILD|WS_VISIBLE, 646, 106, 90, 20, lblRestoreVer)
 	addCombo(idRestoreVersion, restoreVersions, 738, 102, 146, restoreVersionIndex("5.0"))
-	createControl(0, "STATIC", routines[0].Description, WS_CHILD|WS_VISIBLE, 30, 140, 850, 20, idDescription)
+	// Uma linha so: a descricao de cada rotina precisa caber em uiDescriptionWidth.
+	createControl(0, "STATIC", routines[0].Description, WS_CHILD|WS_VISIBLE, 30, 140, uiDescriptionWidth, 20, idDescription)
 
 	addSectionBox(16, 182, 888, 140)
 	addSectionHeader(idSectionFiles, "folder", "2. Origem e destino", 30, 188)

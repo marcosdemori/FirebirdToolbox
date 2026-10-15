@@ -12,8 +12,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 	"unicode/utf8"
 	"unsafe"
+)
+
+var (
+	procGetDC                 = user32.NewProc("GetDC")
+	procReleaseDC             = user32.NewProc("ReleaseDC")
+	procGetTextExtentPoint32W = gdi32.NewProc("GetTextExtentPoint32W")
 )
 
 func TestDrawItemStructUsesNativeArchitectureLayout(t *testing.T) {
@@ -382,6 +389,45 @@ func TestResultShortcutsGainAccentWhenAvailable(t *testing.T) {
 		visual := buttonVisuals[id]
 		if !visual.Accent {
 			t.Fatalf("result shortcut %d must use accent visual when enabled", id)
+		}
+	}
+}
+
+// A descricao da rotina e um STATIC de uma linha: texto mais largo que o
+// controle e cortado em silencio, sem reticencias e sem quebrar linha. Mede
+// cada descricao com a mesma fonte da interface para impedir que uma nova
+// redacao volte a estourar a largura disponivel.
+func TestRoutineDescriptionsFitTheirControl(t *testing.T) {
+	font := createFont(-15, FW_NORMAL, "Segoe UI")
+	if font == 0 {
+		t.Skip("CreateFontW indisponivel neste ambiente")
+	}
+	defer procDeleteObject.Call(uintptr(font))
+
+	hdc, _, _ := procGetDC.Call(0)
+	if hdc == 0 {
+		t.Skip("GetDC indisponivel neste ambiente")
+	}
+	defer procReleaseDC.Call(0, hdc)
+
+	previous, _, _ := procSelectObject.Call(hdc, uintptr(font))
+	defer procSelectObject.Call(hdc, previous)
+
+	for _, routine := range routines {
+		text := utf16.Encode([]rune(routine.Description))
+		var size struct{ CX, CY int32 }
+		ok, _, _ := procGetTextExtentPoint32W.Call(
+			hdc,
+			uintptr(unsafe.Pointer(&text[0])),
+			uintptr(len(text)),
+			uintptr(unsafe.Pointer(&size)),
+		)
+		if ok == 0 {
+			t.Fatalf("nao foi possivel medir a descricao de %q", routine.Name)
+		}
+		if size.CX > uiDescriptionWidth {
+			t.Fatalf("descricao de %q ocupa %d px e seria cortada em %d px: %s",
+				routine.Name, size.CX, uiDescriptionWidth, routine.Description)
 		}
 	}
 }
