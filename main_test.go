@@ -696,11 +696,35 @@ func TestNextRelationToSkipAdvancesOnlyOnNewSafeRelations(t *testing.T) {
 }
 
 func TestAutomaticSkipHasABoundedLimit(t *testing.T) {
-	if maxAutomaticSkipRelations < 2 {
-		t.Fatalf("o acumulo precisa permitir mais de uma tabela: %d", maxAutomaticSkipRelations)
+	// No DBCOM.RED o acumulo ainda progredia quando bateu em 8 tabelas, entao o
+	// teto precisa ser bem maior que isso.
+	if maxAutomaticSkipRelations <= 8 {
+		t.Fatalf("o teto precisa permitir passar das 8 tabelas que o DBCOM.RED exigiu: %d", maxAutomaticSkipRelations)
 	}
-	if maxAutomaticSkipRelations > 16 {
-		t.Fatalf("o limite precisa impedir que o Toolbox esvazie o banco sozinho: %d", maxAutomaticSkipRelations)
+	if maxAutomaticSkipRelations > 64 {
+		t.Fatalf("o teto precisa impedir que o Toolbox esvazie o banco sozinho: %d", maxAutomaticSkipRelations)
+	}
+	// Um unico "sim" nao pode autorizar o teto inteiro: o operador reconfirma por
+	// lote, e precisa haver mais de um lote dentro do teto.
+	if skipConfirmBatch < 1 || skipConfirmBatch >= maxAutomaticSkipRelations {
+		t.Fatalf("o lote de reconfirmacao precisa caber mais de uma vez no teto: lote=%d teto=%d", skipConfirmBatch, maxAutomaticSkipRelations)
+	}
+}
+
+func TestGbakRecordsWrittenMeasuresProgress(t *testing.T) {
+	// Saida real: o acumulo levou o gbak de 16.121 para 883.691 registros.
+	if got := gbakRecordsWritten("gbak:10000 records written\ngbak:16121 records written\n"); got != 16121 {
+		t.Fatalf("progresso da primeira rodada incorreto: %d", got)
+	}
+	if got := gbakRecordsWritten("gbak:880000 records written\ngbak:883691 records written\n"); got != 883691 {
+		t.Fatalf("progresso da oitava rodada incorreto: %d", got)
+	}
+	// O maior valor vale, mesmo que nao seja o ultimo da saida.
+	if got := gbakRecordsWritten("gbak:883691 records written\ngbak:297 records written\n"); got != 883691 {
+		t.Fatalf("deveria valer o maior total: %d", got)
+	}
+	if got := gbakRecordsWritten("gbak:Exiting before completion due to errors"); got != 0 {
+		t.Fatalf("saida sem contagem precisa devolver zero: %d", got)
 	}
 }
 
@@ -716,8 +740,10 @@ func TestReportListsEverySkippedRelation(t *testing.T) {
 		SuspectedRelation: "EMAIL",
 		SkipData:          skipDataRegexFor([]string{"EMAIL", "RDS_DAO_OBJ"}),
 		SkippedRelations:  []string{"EMAIL", "RDS_DAO_OBJ"},
-		PartialRecovery:   true,
-		FinalState:        "RECUPERAÇÃO PARCIAL",
+
+		SkipProgressRecords: 883691,
+		PartialRecovery:     true,
+		FinalState:          "RECUPERAÇÃO PARCIAL",
 	}
 	if err := writeRecoveryReport(r); err != nil {
 		t.Fatalf("writeRecoveryReport: %v", err)
@@ -730,6 +756,7 @@ func TestReportListsEverySkippedRelation(t *testing.T) {
 	for _, want := range []string{
 		"Tabelas excluídas (2): EMAIL, RDS_DAO_OBJ",
 		"o dano está espalhado por mais de um ponto",
+		"Melhor progresso alcançado: 883691 registro(s)",
 		"não fazem parte do backup recuperado",
 	} {
 		if !strings.Contains(text, want) {

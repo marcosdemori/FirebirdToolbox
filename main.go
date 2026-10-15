@@ -4200,12 +4200,32 @@ func suspectedRelationFromGbak(output string) string {
 	return ""
 }
 
-// maxAutomaticSkipRelations limita quantas tabelas o Toolbox exclui sozinho do
-// backup de recuperacao. Cada rodada descarta os dados de mais uma tabela, e um
-// banco com corrupcao espalhada poderia consumir a lista inteira sem nunca
-// fechar o backup. O limite existe para a tentativa parar e devolver a decisao
-// ao operador em vez de ir esvaziando o banco em silencio.
-const maxAutomaticSkipRelations = 8
+// maxAutomaticSkipRelations e o teto absoluto de tabelas que o Toolbox exclui
+// sozinho do backup de recuperacao. O primeiro valor, 8, era baixo demais: no
+// DBCOM.RED o acumulo levou o gbak de 16.121 para 883.691 registros gravados e
+// parou no limite ainda progredindo, com LOG_CAD como proxima tabela.
+const maxAutomaticSkipRelations = 32
+
+// skipConfirmBatch e de quantas em quantas tabelas o operador reconfirma. Cada
+// rodada descarta os dados de mais uma tabela, entao um unico "sim" nao pode
+// autorizar 32 exclusoes: a cada lote o Toolbox mostra o que ja saiu, quanto
+// progrediu e qual seria a proxima.
+const skipConfirmBatch = 8
+
+var gbakRecordsWrittenRe = regexp.MustCompile(`(?i)(\d+)\s+records written`)
+
+// gbakRecordsWritten devolve o maior total que o gbak informou na saida. E a
+// medida honesta de progresso entre rodadas: se o numero nao sobe, excluir mais
+// tabelas nao esta comprando nada e insistir so descarta dados a toa.
+func gbakRecordsWritten(output string) int64 {
+	var best int64
+	for _, m := range gbakRecordsWrittenRe.FindAllStringSubmatch(output, -1) {
+		if n, err := strconv.ParseInt(m[1], 10, 64); err == nil && n > best {
+			best = n
+		}
+	}
+	return best
+}
 
 // skipDataRegexFor monta a regex do -skip_data para varias relacoes. Cada nome
 // e escapado individualmente, porque no padrao do -skip_data o "_" casa com
@@ -5459,6 +5479,7 @@ type recoveryReport struct {
 	SuspectedRelationSource   string
 	EngineCrashRelation       string
 	SkippedRelations          []string
+	SkipProgressRecords       int64
 	IndexRescueAttempted      bool
 	IndexesDisabled           []string
 	RowRescueAttempted        bool
@@ -5598,6 +5619,9 @@ func writeRecoveryReport(r recoveryReport) error {
 		}
 		if len(r.SkippedRelations) > 1 {
 			b.WriteString("Cada tabela acima foi acrescentada depois de uma nova falha do gbak: o dano está espalhado por mais de um ponto.\r\n")
+		}
+		if r.SkipProgressRecords > 0 {
+			b.WriteString(fmt.Sprintf("Melhor progresso alcançado: %d registro(s) gravados pelo gbak.\r\n", r.SkipProgressRecords))
 		}
 		b.WriteString("ATENÇÃO: os dados das relações correspondentes não fazem parte do backup recuperado.\r\n")
 	}
@@ -7554,6 +7578,7 @@ func runAdvancedRecovery(ctx context.Context, c workflowConfig) (retErr error) {
 				// saida so denuncia a proxima quando a anterior deixa de bloquear.
 				// Por isso o -skip_data acumula em vez de desistir na primeira.
 				skipped := []string{report.SuspectedRelation}
+				var skipProgress int64
 				var skipRegex string
 				var partialOutput string
 				var partialErr error
@@ -7567,20 +7592,36 @@ func runAdvancedRecovery(ctx context.Context, c workflowConfig) (retErr error) {
 					if partialErr == nil && fileExists(backup) {
 						break
 					}
+					written := gbakRecordsWritten(partialOutput)
+					if written > skipProgress {
+						skipProgress = written
+					}
+					appendLog(fmt.Sprintf("Rodada %d do -skip_data: %d registro(s) gravados antes de falhar.", len(skipped), written))
 					next := nextRelationToSkip(partialOutput, skipped)
 					if next == "" {
 						break
 					}
 					if len(skipped) >= maxAutomaticSkipRelations {
-						report.warning(fmt.Sprintf("O limite de %d tabelas excluídas automaticamente foi atingido; o backup ainda falhava e a tabela seguinte seria %s. Informe a regex manualmente em 'Pular tabelas (regex)' se quiser continuar excluindo.", maxAutomaticSkipRelations, next))
-						appendLog(fmt.Sprintf("Limite de %d tabelas excluídas atingido; a próxima seria %s.", maxAutomaticSkipRelations, next))
+						report.warning(fmt.Sprintf("O teto de %d tabelas excluídas automaticamente foi atingido; o backup ainda falhava e a tabela seguinte seria %s. Informe a regex manualmente em 'Pular tabelas (regex)' se quiser continuar excluindo.", maxAutomaticSkipRelations, next))
+						appendLog(fmt.Sprintf("Teto de %d tabelas excluídas atingido; a próxima seria %s.", maxAutomaticSkipRelations, next))
 						break
+					}
+					// Um unico "sim" la atras nao autoriza dezenas de exclusoes. A
+					// cada lote o operador ve o que ja saiu e decide de novo.
+					if len(skipped)%skipConfirmBatch == 0 {
+						msg := fmt.Sprintf("O backup ainda falha depois de excluir %d tabelas:\n\n%s\n\nMelhor resultado até agora: %d registro(s) gravados.\nA próxima tabela a excluir seria %s.\n\nCada tabela excluída fica FORA do backup. Deseja continuar excluindo?", len(skipped), strings.Join(skipped, ", "), skipProgress, next)
+						if messageBox("Continuar excluindo tabelas?", msg, MB_YESNO|MB_ICONWARNING) != IDYES {
+							report.warning(fmt.Sprintf("O operador interrompeu o acúmulo do -skip_data com %d tabelas excluídas; a tabela seguinte seria %s", len(skipped), next))
+							appendLog("Acúmulo interrompido pelo operador.")
+							break
+						}
 					}
 					appendLog("O backup ainda falhou; acrescentando " + next + " às tabelas excluídas.")
 					report.action("Tabela " + next + " acrescentada ao -skip_data após nova falha do gbak")
 					skipped = append(skipped, next)
 				}
 				report.SkippedRelations = skipped
+				report.SkipProgressRecords = skipProgress
 				if len(skipped) > 1 {
 					report.warning("Foram necessárias " + strconv.Itoa(len(skipped)) + " tabelas excluídas do backup: " + strings.Join(skipped, ", ") + ". O dano não está em um único ponto.")
 				}
