@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Version = "1.2.32",
     [string]$SigningPfx = "",
     [string]$SigningPassword = "",
@@ -8,6 +8,28 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $Dist = Join-Path $Root "dist"
+
+# O Windows PowerShell 5.1 transforma a saida de stderr de comandos nativos em
+# NativeCommandError terminante quando $ErrorActionPreference e "Stop", mesmo
+# quando o comando termina com exit code 0 (por exemplo "go: downloading ...").
+# Executa o comando nativo com o preference relaxado, preserva o "Stop" para o
+# restante do script e decide o sucesso apenas pelo $LASTEXITCODE.
+function Invoke-NativeCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$Command,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$What
+    )
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Command @Arguments
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($LASTEXITCODE -ne 0) { throw "$What falhou com codigo $LASTEXITCODE." }
+}
 
 Push-Location $Root
 try {
@@ -19,7 +41,7 @@ try {
     New-Item -ItemType Directory -Path $Dist | Out-Null
 
     Write-Host "[1/7] gofmt..."
-    $badFormat = gofmt -l .
+    $badFormat = Invoke-NativeCommand -Command "gofmt" -Arguments @("-l", ".") -What "gofmt"
     if ($badFormat) {
         Write-Host $badFormat
         throw "Existem arquivos Go fora do padrao gofmt."
@@ -31,12 +53,12 @@ try {
     Write-Host "[3/7] go vet (Windows x64)..."
     $env:GOOS = "windows"
     $env:GOARCH = "amd64"
-    go vet ./...
+    Invoke-NativeCommand -Command "go" -Arguments @("vet", "./...") -What "go vet"
 
     Write-Host "[4/7] Compilando testes Windows x64/x86..."
-    go test -c -o (Join-Path $Dist "FirebirdToolbox_tests_x64.exe") .
+    Invoke-NativeCommand -Command "go" -Arguments @("test", "-c", "-o", (Join-Path $Dist "FirebirdToolbox_tests_x64.exe"), ".") -What "go test -c x64"
     $env:GOARCH = "386"
-    go test -c -o (Join-Path $Dist "FirebirdToolbox_tests_x86.exe") .
+    Invoke-NativeCommand -Command "go" -Arguments @("test", "-c", "-o", (Join-Path $Dist "FirebirdToolbox_tests_x86.exe"), ".") -What "go test -c x86"
 
     Write-Host "[5/7] Compilando aplicativo unico Windows x86/x64 com metadados..."
     $ld = "-H=windowsgui -X main.appVersion=$Version"
@@ -49,8 +71,7 @@ try {
     $env:GOARCH = "386"
     $universalOut = Join-Path $Dist "FirebirdToolbox_v${Version}_x86_x64${suffix}.exe"
     $goArgs = @("build", "-trimpath", "-buildvcs=false", "-ldflags", $ld, "-o", $universalOut, ".")
-    & go @goArgs
-    if ($LASTEXITCODE -ne 0) { throw "go build x86/x64 falhou com codigo $LASTEXITCODE." }
+    Invoke-NativeCommand -Command "go" -Arguments $goArgs -What "go build x86/x64"
 
     $apps = @($universalOut)
     foreach ($app in $apps) {

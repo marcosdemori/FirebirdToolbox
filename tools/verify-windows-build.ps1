@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory=$true)][string]$Path,
     [string]$Version = "1.2.32",
     [switch]$RequireSignature,

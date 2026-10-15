@@ -4141,6 +4141,427 @@ func gbakLooksLikeOrphanForeignKey(output string) bool {
 		(strings.Contains(lower, "action cancelled by trigger") && strings.Contains(lower, "preserve data integrity"))
 }
 
+// constraintDefinition descreve uma FOREIGN KEY ou uma CHECK lida das tabelas
+// de sistema do banco de origem. O restore com -n (-no_validity) nao recria
+// nenhuma das duas, entao a definicao precisa ser extraida e guardada em
+// script antes de o -n rodar.
+type constraintDefinition struct {
+	Name        string
+	Relation    string
+	Type        string
+	Columns     []string
+	RefRelation string
+	RefColumns  []string
+	UpdateRule  string
+	DeleteRule  string
+	Check       string
+	// Truncated marca a CHECK cuja expressao passou do limite do CAST e veio
+	// cortada do banco. O DDL dessa constraint nao pode ser executado.
+	Truncated bool
+}
+
+const (
+	constraintTypeForeignKey = "FOREIGN KEY"
+	constraintTypeCheck      = "CHECK"
+
+	constraintsScriptName = "CONSTRAINTS_ORIGINAIS.sql"
+	constraintsDumpName   = "CONSTRAINTS_ORIGINAIS_SCHEMA_COMPLETO.sql"
+	orphanRowsScriptName  = "LINHAS_ORFAS.sql"
+
+	// constraintCheckSourceLimit e o tamanho do CAST que le RDB$TRIGGER_SOURCE.
+	// A consulta devolve tambem o CHAR_LENGTH real para que a expressao cortada
+	// seja detectada em vez de virar um ALTER TABLE invalido.
+	constraintCheckSourceLimit = 4000
+)
+
+// constraintsExtractionScript le as FOREIGN KEY e as CHECK pelas tabelas de
+// sistema em vez de usar isql -x, que despeja o schema inteiro. A FK sai com
+// uma linha por segmento do indice; o Go reagrupa por nome da constraint.
+func constraintsExtractionScript() string {
+	return "SET HEADING OFF;\nSET LIST OFF;\nSET COUNT OFF;\n" +
+		"SELECT 'FTB_FKC|' || TRIM(rc.RDB$CONSTRAINT_NAME) || '|' || TRIM(rc.RDB$RELATION_NAME) || '|' || TRIM(s.RDB$FIELD_NAME) || '|' || TRIM(puk.RDB$RELATION_NAME) || '|' || TRIM(ps.RDB$FIELD_NAME) || '|' || TRIM(COALESCE(ref.RDB$UPDATE_RULE, '')) || '|' || TRIM(COALESCE(ref.RDB$DELETE_RULE, '')) " +
+		"FROM RDB$RELATION_CONSTRAINTS rc " +
+		"JOIN RDB$REF_CONSTRAINTS ref ON ref.RDB$CONSTRAINT_NAME = rc.RDB$CONSTRAINT_NAME " +
+		"JOIN RDB$RELATION_CONSTRAINTS puk ON puk.RDB$CONSTRAINT_NAME = ref.RDB$CONST_NAME_UQ " +
+		"JOIN RDB$INDEX_SEGMENTS s ON s.RDB$INDEX_NAME = rc.RDB$INDEX_NAME " +
+		"JOIN RDB$INDEX_SEGMENTS ps ON ps.RDB$INDEX_NAME = puk.RDB$INDEX_NAME AND ps.RDB$FIELD_POSITION = s.RDB$FIELD_POSITION " +
+		"WHERE rc.RDB$CONSTRAINT_TYPE = 'FOREIGN KEY' " +
+		"ORDER BY rc.RDB$RELATION_NAME, rc.RDB$CONSTRAINT_NAME, s.RDB$FIELD_POSITION;\n" +
+		"SELECT 'FTB_CHK|' || TRIM(rc.RDB$CONSTRAINT_NAME) || '|' || TRIM(rc.RDB$RELATION_NAME) || '|' || CAST(COALESCE(CHAR_LENGTH(t.RDB$TRIGGER_SOURCE), 0) AS VARCHAR(10)) || '|' || TRIM(COALESCE(REPLACE(REPLACE(CAST(t.RDB$TRIGGER_SOURCE AS VARCHAR(" + strconv.Itoa(constraintCheckSourceLimit) + ")), ASCII_CHAR(13), ' '), ASCII_CHAR(10), ' '), '')) " +
+		"FROM RDB$RELATION_CONSTRAINTS rc " +
+		"JOIN RDB$CHECK_CONSTRAINTS cc ON cc.RDB$CONSTRAINT_NAME = rc.RDB$CONSTRAINT_NAME " +
+		"JOIN RDB$TRIGGERS t ON t.RDB$TRIGGER_NAME = cc.RDB$TRIGGER_NAME " +
+		"WHERE rc.RDB$CONSTRAINT_TYPE = 'CHECK' AND t.RDB$TRIGGER_TYPE = 1 " +
+		"ORDER BY rc.RDB$RELATION_NAME, rc.RDB$CONSTRAINT_NAME;\nQUIT;\n"
+}
+
+func parseConstraintDefinitions(output string) []constraintDefinition {
+	var order []string
+	byKey := map[string]*constraintDefinition{}
+	for _, item := range markerLines(output, "FTB_FKC|") {
+		parts := strings.Split(item, "|")
+		if len(parts) < 5 {
+			continue
+		}
+		name := strings.TrimSpace(parts[0])
+		relation := strings.TrimSpace(parts[1])
+		column := strings.TrimSpace(parts[2])
+		refRelation := strings.TrimSpace(parts[3])
+		refColumn := strings.TrimSpace(parts[4])
+		if name == "" || relation == "" || column == "" || refRelation == "" || refColumn == "" {
+			continue
+		}
+		key := constraintTypeForeignKey + "|" + name
+		current, ok := byKey[key]
+		if !ok {
+			current = &constraintDefinition{Name: name, Relation: relation, Type: constraintTypeForeignKey, RefRelation: refRelation}
+			if len(parts) >= 6 {
+				current.UpdateRule = strings.TrimSpace(parts[5])
+			}
+			if len(parts) >= 7 {
+				current.DeleteRule = strings.TrimSpace(parts[6])
+			}
+			byKey[key] = current
+			order = append(order, key)
+		}
+		current.Columns = append(current.Columns, column)
+		current.RefColumns = append(current.RefColumns, refColumn)
+	}
+	// A CHECK gera um gatilho por evento; a consulta ja filtra o BEFORE INSERT,
+	// mas bancos antigos podem devolver mais de uma linha para a mesma
+	// constraint. Fica a primeira.
+	for _, item := range markerLines(output, "FTB_CHK|") {
+		parts := strings.SplitN(item, "|", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		name := strings.TrimSpace(parts[0])
+		relation := strings.TrimSpace(parts[1])
+		source := strings.TrimSpace(parts[3])
+		if name == "" || relation == "" || source == "" {
+			continue
+		}
+		key := constraintTypeCheck + "|" + name
+		if _, ok := byKey[key]; ok {
+			continue
+		}
+		// O CHAR_LENGTH vem do blob inteiro; o texto vem do CAST limitado. Se o
+		// blob for maior que o limite, a expressao chegou cortada. Quando o
+		// banco nao sabe informar o tamanho, o proprio texto no limite denuncia.
+		fullLength, lengthErr := strconv.Atoi(strings.TrimSpace(parts[2]))
+		truncated := fullLength > constraintCheckSourceLimit
+		if lengthErr != nil && len([]rune(source)) >= constraintCheckSourceLimit {
+			truncated = true
+		}
+		byKey[key] = &constraintDefinition{Name: name, Relation: relation, Type: constraintTypeCheck, Check: source, Truncated: truncated}
+		order = append(order, key)
+	}
+	result := make([]constraintDefinition, 0, len(order))
+	for _, key := range order {
+		result = append(result, *byKey[key])
+	}
+	return result
+}
+
+// constraintIdentifiersQuoted decide se o script gerado pode usar aspas duplas.
+// No dialeto 1 a aspa dupla e literal de string, nao identificador, e o script
+// nao executaria; os nomes de metadados do dialeto 1 sao sempre maiusculos e
+// sem espaco, entao o nome cru serve. Dialeto desconhecido cai no 3, que e o
+// caso comum e o unico em que um nome com minuscula ou espaco pode existir.
+func constraintIdentifiersQuoted(dialect string) bool {
+	return strings.TrimSpace(dialect) != "1"
+}
+
+// constraintIdentifier e o sqlIdentifier do script de constraints. O
+// sqlIdentifier original e usado em outros pontos e continua intocado.
+func constraintIdentifier(name string, quoted bool) string {
+	if quoted {
+		return sqlIdentifier(name)
+	}
+	return strings.TrimSpace(name)
+}
+
+func constraintIdentifierList(columns []string, quoted bool) string {
+	parts := make([]string, 0, len(columns))
+	for _, column := range columns {
+		parts = append(parts, constraintIdentifier(column, quoted))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// foreignKeyRuleClause omite RESTRICT e NO ACTION, que sao o comportamento
+// padrao e nao precisam aparecer no DDL.
+func foreignKeyRuleClause(event, rule string) string {
+	rule = strings.ToUpper(strings.TrimSpace(rule))
+	if rule == "" || rule == "RESTRICT" || rule == "NO ACTION" {
+		return ""
+	}
+	return " ON " + event + " " + rule
+}
+
+func constraintDDL(c constraintDefinition, quoted bool) string {
+	switch c.Type {
+	case constraintTypeForeignKey:
+		if c.Name == "" || c.Relation == "" || c.RefRelation == "" || len(c.Columns) == 0 || len(c.Columns) != len(c.RefColumns) {
+			return ""
+		}
+		return "ALTER TABLE " + constraintIdentifier(c.Relation, quoted) + " ADD CONSTRAINT " + constraintIdentifier(c.Name, quoted) +
+			" FOREIGN KEY (" + constraintIdentifierList(c.Columns, quoted) + ") REFERENCES " + constraintIdentifier(c.RefRelation, quoted) +
+			" (" + constraintIdentifierList(c.RefColumns, quoted) + ")" +
+			foreignKeyRuleClause("UPDATE", c.UpdateRule) + foreignKeyRuleClause("DELETE", c.DeleteRule) + ";"
+	case constraintTypeCheck:
+		expr := strings.TrimSpace(c.Check)
+		if c.Name == "" || c.Relation == "" || expr == "" {
+			return ""
+		}
+		if !strings.HasPrefix(strings.ToUpper(expr), "CHECK") {
+			expr = "CHECK " + expr
+		}
+		return "ALTER TABLE " + constraintIdentifier(c.Relation, quoted) + " ADD CONSTRAINT " + constraintIdentifier(c.Name, quoted) + " " + expr + ";"
+	}
+	return ""
+}
+
+// truncatedCheckConstraints lista as CHECK cuja expressao veio cortada do
+// banco. Elas nao podem ser recriadas pelo script e precisam ser recuperadas
+// a mao.
+func truncatedCheckConstraints(constraints []constraintDefinition) []string {
+	var names []string
+	for _, c := range constraints {
+		if c.Type == constraintTypeCheck && c.Truncated {
+			names = append(names, c.Name+" em "+c.Relation)
+		}
+	}
+	return names
+}
+
+func buildConstraintsDDLScript(constraints []constraintDefinition, dialect string) string {
+	quoted := constraintIdentifiersQuoted(dialect)
+	var b strings.Builder
+	b.WriteString("/* FIREBIRD TOOLBOX - CONSTRAINTS ORIGINAIS DO BANCO DE ORIGEM */\n")
+	b.WriteString("/* O banco restaurado com -n (-no_validity) NAO possui estas constraints. */\n")
+	b.WriteString("/* Sanear as linhas orfas (ver " + orphanRowsScriptName + ") ANTES de executar este script. */\n")
+	if !quoted {
+		b.WriteString("/* Banco em dialeto 1: os identificadores vao sem aspas duplas, que ali sao literal de string. */\n")
+	}
+	b.WriteString("/* Execucao: isql -user SYSDBA -password <senha> <banco> -i " + constraintsScriptName + " */\n\n")
+	if len(constraints) == 0 {
+		b.WriteString("/* Nenhuma FOREIGN KEY ou CHECK foi lida das tabelas de sistema do banco de origem. */\n")
+		return b.String()
+	}
+	b.WriteString("SET AUTODDL OFF;\n\n")
+	written := 0
+	for _, c := range constraints {
+		ddl := constraintDDL(c, quoted)
+		if ddl == "" {
+			continue
+		}
+		// A expressao cortada geraria um ALTER TABLE invalido. Sai comentada,
+		// com o aviso de que precisa ser recuperada a mao.
+		if c.Truncated {
+			b.WriteString("-- ATENCAO: a expressao desta CHECK passa de " + strconv.Itoa(constraintCheckSourceLimit) + " caracteres e foi lida CORTADA.\n")
+			b.WriteString("-- O comando abaixo esta INCOMPLETO e fica comentado. Recupere a expressao original antes de executar.\n")
+			for _, line := range strings.Split(ddl, "\n") {
+				b.WriteString("-- " + line + "\n")
+			}
+			b.WriteString("\n")
+			continue
+		}
+		b.WriteString("/* " + c.Type + " " + c.Name + " em " + c.Relation + " */\n")
+		b.WriteString(ddl + "\n")
+		b.WriteString("COMMIT;\n\n")
+		written++
+	}
+	if written == 0 {
+		b.WriteString("/* Nenhuma constraint pode ser reconstruida com os metadados lidos. */\n")
+	}
+	return b.String()
+}
+
+// orphanRowsQuery monta a consulta que lista os filhos sem pai para uma FK.
+// So consulta: a decisao de apagar ou corrigir e do tecnico.
+func orphanRowsQuery(c constraintDefinition, quoted bool) string {
+	if c.Type != constraintTypeForeignKey || c.Relation == "" || c.RefRelation == "" {
+		return ""
+	}
+	if len(c.Columns) == 0 || len(c.Columns) != len(c.RefColumns) {
+		return ""
+	}
+	notNull := make([]string, 0, len(c.Columns))
+	match := make([]string, 0, len(c.Columns))
+	for i, column := range c.Columns {
+		notNull = append(notNull, "F."+constraintIdentifier(column, quoted)+" IS NOT NULL")
+		match = append(match, "P."+constraintIdentifier(c.RefColumns[i], quoted)+" = F."+constraintIdentifier(column, quoted))
+	}
+	where := strings.Join(notNull, " AND ") +
+		" AND NOT EXISTS (SELECT 1 FROM " + constraintIdentifier(c.RefRelation, quoted) + " P WHERE " + strings.Join(match, " AND ") + ")"
+	return "SELECT COUNT(*) FROM " + constraintIdentifier(c.Relation, quoted) + " F WHERE " + where + ";\n" +
+		"SELECT F.* FROM " + constraintIdentifier(c.Relation, quoted) + " F WHERE " + where + ";\n\n"
+}
+
+func buildOrphanRowsScript(constraints []constraintDefinition, dialect string) string {
+	quoted := constraintIdentifiersQuoted(dialect)
+	var b strings.Builder
+	b.WriteString("/* FIREBIRD TOOLBOX - LINHAS ORFAS POR FOREIGN KEY */\n")
+	b.WriteString("/* Somente consultas: este script NAO apaga e NAO altera nenhuma linha. */\n")
+	b.WriteString("/* Inspecione cada resultado antes de decidir apagar ou corrigir as linhas filhas. */\n")
+	if !quoted {
+		b.WriteString("/* Banco em dialeto 1: os identificadores vao sem aspas duplas, que ali sao literal de string. */\n")
+	}
+	b.WriteString("/* Depois de sanear, recrie as constraints com " + constraintsScriptName + ". */\n\n")
+	written := 0
+	for _, c := range constraints {
+		query := orphanRowsQuery(c, quoted)
+		if query == "" {
+			continue
+		}
+		b.WriteString("/* " + c.Name + ": " + c.Relation + " -> " + c.RefRelation + " */\n")
+		b.WriteString(query)
+		written++
+	}
+	if written == 0 {
+		b.WriteString("/* Nenhuma FOREIGN KEY foi lida do banco de origem. */\n")
+	}
+	return b.String()
+}
+
+// databaseDialectOf le o dialeto pelo cabecalho do gstat. Volta vazio quando
+// nao da para saber, e ai o script e gerado como dialeto 3.
+func databaseDialectOf(ctx context.Context, root, version, dbPath string) string {
+	gstat := firebirdExe(root, version, "gstat.exe")
+	if !fileExists(gstat) {
+		return ""
+	}
+	output, err := runCommandCapture(ctx, gstat, "-h", dbPath)
+	if err != nil {
+		return ""
+	}
+	return parseDatabaseHeader(output).Dialect
+}
+
+// constraintSourceCandidates lista os bancos de onde o DDL pode ser lido, da
+// copia de trabalho (ja saneada) para o original.
+func constraintSourceCandidates(c workflowConfig, report *recoveryReport) []string {
+	var candidates []string
+	if report != nil && report.WorkingCopy != "" && fileExists(report.WorkingCopy) {
+		candidates = append(candidates, report.WorkingCopy)
+	}
+	if c.Source != "" && fileExists(c.Source) {
+		candidates = append(candidates, c.Source)
+	}
+	return candidates
+}
+
+// preserveConstraintsBeforeNoValidity grava o DDL das constraints na pasta
+// RECOVERY_* antes de o restore com -n apaga-las dos metadados. Nunca aborta a
+// recuperacao: um restore sem constraints continua melhor que nenhum restore,
+// entao toda falha vira aviso no relatorio.
+func preserveConstraintsBeforeNoValidity(ctx context.Context, c workflowConfig, report *recoveryReport, dir string) []constraintDefinition {
+	if report == nil || dir == "" {
+		return nil
+	}
+	candidates := constraintSourceCandidates(c, report)
+	if len(candidates) == 0 {
+		report.warning("Não havia banco de origem acessível para extrair o DDL das constraints antes do restore com -n")
+		return nil
+	}
+	var lastErr error
+	for _, dbPath := range candidates {
+		out, err := runISQLScript(ctx, c.FbSource, c.SourceVersion, c.SourcePort, c.User, c.Password, dbPath, "Extraindo o DDL das constraints antes do restore com -n...", constraintsExtractionScript())
+		constraints := parseConstraintDefinitions(out)
+		if len(constraints) == 0 {
+			if err != nil {
+				lastErr = err
+			}
+			continue
+		}
+		if err != nil {
+			report.warning("A leitura das constraints retornou erro parcial; o script pode estar incompleto: " + err.Error())
+		}
+		report.ConstraintsDialect = databaseDialectOf(ctx, c.FbSource, c.SourceVersion, dbPath)
+		if !constraintIdentifiersQuoted(report.ConstraintsDialect) {
+			report.action("Banco de origem em dialeto 1: o script das constraints foi gerado sem aspas duplas nos identificadores")
+		}
+		for _, name := range truncatedCheckConstraints(constraints) {
+			report.warning("A expressão da CHECK " + name + " passa de " + strconv.Itoa(constraintCheckSourceLimit) + " caracteres e foi lida cortada; ela sai comentada em " + constraintsScriptName + " e precisa ser recuperada manualmente")
+		}
+		path := filepath.Join(dir, constraintsScriptName)
+		if writeErr := os.WriteFile(path, []byte(buildConstraintsDDLScript(constraints, report.ConstraintsDialect)), 0600); writeErr != nil {
+			report.warning("Não foi possível gravar " + constraintsScriptName + ": " + writeErr.Error())
+			return constraints
+		}
+		report.ConstraintsScript = path
+		report.ConstraintsExtracted = len(constraints)
+		report.action(fmt.Sprintf("DDL de %d constraint(s) extraído de %s e preservado em %s antes do restore com -n", len(constraints), dbPath, constraintsScriptName))
+		appendLog("✓ DDL das constraints preservado em: " + path)
+		return constraints
+	}
+	detail := ""
+	if lastErr != nil {
+		detail = ": " + lastErr.Error()
+	}
+	report.warning("Não foi possível ler as constraints pelas tabelas de sistema antes do restore com -n" + detail)
+	dumpSchemaBeforeNoValidity(ctx, c, report, dir, candidates)
+	return nil
+}
+
+// dumpSchemaBeforeNoValidity e a alternativa quando a consulta as tabelas de
+// sistema falha: isql -x despeja o schema inteiro, de onde o tecnico extrai os
+// ALTER TABLE ... ADD CONSTRAINT a mao.
+func dumpSchemaBeforeNoValidity(ctx context.Context, c workflowConfig, report *recoveryReport, dir string, candidates []string) {
+	isql := firebirdExe(c.FbSource, c.SourceVersion, "isql.exe")
+	if !fileExists(isql) {
+		report.warning("Não encontrei isql.exe do Firebird " + c.SourceVersion + " para extrair o schema completo como alternativa")
+		return
+	}
+	path := filepath.Join(dir, constraintsDumpName)
+	for _, dbPath := range candidates {
+		_ = os.Remove(path)
+		// O -o manda a saida direto para o arquivo: o schema completo nao cabe
+		// no limite de linhas capturadas pelo log.
+		_, err := runRecoveryCapture(ctx, "Extraindo o schema completo com isql -x (alternativa)...", isql,
+			"-x", "-o", path, "-user", c.User, "-password", c.Password, databaseConnection(c.SourcePort, dbPath))
+		if err != nil {
+			continue
+		}
+		if info, statErr := os.Stat(path); statErr != nil || info.Size() == 0 {
+			continue
+		}
+		report.ConstraintsDump = path
+		report.action("Schema completo extraído com isql -x de " + dbPath + " e preservado em " + constraintsDumpName)
+		appendLog("✓ Schema completo preservado em: " + path)
+		return
+	}
+	_ = os.Remove(path)
+	report.warning("Também não foi possível extrair o schema completo com isql -x; a definição das constraints terá de vir de um backup anterior")
+}
+
+// writeOrphanRowsInspectionScript grava as consultas que listam os filhos sem
+// pai, para o tecnico inspecionar antes de apagar qualquer coisa.
+func writeOrphanRowsInspectionScript(report *recoveryReport, dir string, constraints []constraintDefinition) {
+	if report == nil || dir == "" {
+		return
+	}
+	foreignKeys := 0
+	for _, c := range constraints {
+		if c.Type == constraintTypeForeignKey {
+			foreignKeys++
+		}
+	}
+	if foreignKeys == 0 {
+		report.warning("Nenhuma FOREIGN KEY foi lida do banco de origem; o script de inspeção de linhas órfãs não foi gerado")
+		return
+	}
+	path := filepath.Join(dir, orphanRowsScriptName)
+	if err := os.WriteFile(path, []byte(buildOrphanRowsScript(constraints, report.ConstraintsDialect)), 0600); err != nil {
+		report.warning("Não foi possível gravar " + orphanRowsScriptName + ": " + err.Error())
+		return
+	}
+	report.OrphanRowsScript = path
+	report.action(fmt.Sprintf("Script de inspeção de linhas órfãs gerado para %d FOREIGN KEY", foreignKeys))
+	appendLog("✓ Consultas de linhas órfãs preservadas em: " + path)
+}
+
 func metadataBackupPath(backup string) string {
 	ext := filepath.Ext(backup)
 	base := strings.TrimSuffix(backup, ext)
@@ -4849,6 +5270,11 @@ type recoveryReport struct {
 	DuplicateConflicts        []restoreDuplicateConflict
 	OrphanFKDetected          bool
 	NoValidityRestore         bool
+	ConstraintsScript         string
+	ConstraintsDump           string
+	ConstraintsDialect        string
+	ConstraintsExtracted      int
+	OrphanRowsScript          string
 	CleanRebuildAttempted     bool
 	CleanRebuildRelation      string
 	CleanRebuildStage         string
@@ -4879,6 +5305,31 @@ func (r *recoveryReport) warning(text string) {
 
 func (r *recoveryReport) fail(text string) {
 	r.Errors = append(r.Errors, text)
+}
+
+// noValidityConstraintWarnings monta os avisos do restore com -n: o banco
+// restaurado nao tem as constraints e o operador precisa saber onde estao os
+// scripts para inspecionar as linhas orfas e recriar as constraints depois.
+func noValidityConstraintWarnings(r recoveryReport) []string {
+	if !r.NoValidityRestore {
+		return nil
+	}
+	warnings := []string{
+		"O banco foi restaurado com -n (-no_validity): as FOREIGN KEY e as constraints CHECK NÃO existem no banco restaurado",
+	}
+	switch {
+	case r.ConstraintsScript != "":
+		warnings = append(warnings, fmt.Sprintf("DDL das constraints originais preservado em %s (%d constraint(s)); execute-o para recriá-las", r.ConstraintsScript, r.ConstraintsExtracted))
+	case r.ConstraintsDump != "":
+		warnings = append(warnings, "Não foi possível montar o DDL das constraints; o schema completo do banco de origem ficou em "+r.ConstraintsDump+", de onde os ALTER TABLE ... ADD CONSTRAINT devem ser extraídos manualmente")
+	default:
+		warnings = append(warnings, "Não foi possível extrair o DDL das constraints do banco de origem; recupere a definição delas de um backup anterior antes de recriá-las")
+	}
+	if r.OrphanRowsScript != "" {
+		warnings = append(warnings, "Linhas órfãs: execute "+r.OrphanRowsScript+" para listar os filhos sem pai; inspecione os resultados antes de apagar ou corrigir qualquer linha")
+	}
+	warnings = append(warnings, "Recrie as constraints somente depois de sanear as linhas órfãs; enquanto isso não for feito o banco NÃO é apto para produção")
+	return warnings
 }
 
 func writeRecoveryReport(r recoveryReport) error {
@@ -5041,6 +5492,15 @@ func writeRecoveryReport(r recoveryReport) error {
 	if r.CleanRebuildBackup != "" {
 		b.WriteString("Backup após reconstrução limpa de " + r.CleanRebuildRelation + ": " + r.CleanRebuildBackup + "\r\n")
 	}
+	if r.ConstraintsScript != "" {
+		b.WriteString("Script com as constraints originais: " + r.ConstraintsScript + "\r\n")
+	}
+	if r.ConstraintsDump != "" {
+		b.WriteString("Schema completo extraído com isql -x: " + r.ConstraintsDump + "\r\n")
+	}
+	if r.OrphanRowsScript != "" {
+		b.WriteString("Script de inspeção de linhas órfãs: " + r.OrphanRowsScript + "\r\n")
+	}
 	if r.HealthReport != "" {
 		b.WriteString("Relatório de saúde e pós-recuperação: " + r.HealthReport + "\r\n")
 	}
@@ -5062,9 +5522,11 @@ func writeRecoveryReport(r recoveryReport) error {
 	for _, item := range r.Actions {
 		b.WriteString("- " + item + "\r\n")
 	}
-	if len(r.Warnings) > 0 {
+	warnings := append([]string(nil), r.Warnings...)
+	warnings = append(warnings, noValidityConstraintWarnings(r)...)
+	if len(warnings) > 0 {
 		b.WriteString("\r\nAVISOS\r\n")
-		for _, item := range r.Warnings {
+		for _, item := range warnings {
 			b.WriteString("- " + item + "\r\n")
 		}
 	}
@@ -6489,7 +6951,12 @@ func verifyBackupByRestoreDepth(ctx context.Context, c workflowConfig, backup, t
 		report.OrphanFKDetected = true
 		appendLog("Restore falhou ao recriar uma FOREIGN KEY: há linhas órfãs apontando para chaves que se perderam na corrupção.")
 		report.warning("Restore detectou integridade referencial quebrada; -one_at_a_time não resolve porque a falha é na criação da constraint, não nos dados")
-		if messageBox("Integridade referencial quebrada", "O restore falhou ao recriar uma FOREIGN KEY:\n\nNon-existent PRIMARY or UNIQUE KEY specified for FOREIGN KEY\n\nOs registros perdidos na corrupção eram linhas-pai, e os filhos sobreviveram apontando para chaves que não existem mais.\n\nDeseja tentar o restore com -n (-no_validity)?\n\nATENÇÃO: o banco restaurado ficará SEM as FOREIGN KEY e SEM as constraints CHECK. Elas terão de ser recriadas manualmente depois de sanear as linhas órfãs. Extraia o DDL original antes (isql -x) ou a definição das constraints será perdida.", MB_YESNO|MB_ICONWARNING) == IDYES {
+		if messageBox("Integridade referencial quebrada", "O restore falhou ao recriar uma FOREIGN KEY:\n\nNon-existent PRIMARY or UNIQUE KEY specified for FOREIGN KEY\n\nOs registros perdidos na corrupção eram linhas-pai, e os filhos sobreviveram apontando para chaves que não existem mais.\n\nDeseja tentar o restore com -n (-no_validity)?\n\nATENÇÃO: o banco restaurado ficará SEM as FOREIGN KEY e SEM as constraints CHECK. Elas terão de ser recriadas manualmente depois de sanear as linhas órfãs.\n\nO DDL das constraints originais será extraído automaticamente antes do restore e gravado na pasta RECOVERY_... em "+constraintsScriptName+". As consultas que listam as linhas órfãs ficarão em "+orphanRowsScriptName+", na mesma pasta.", MB_YESNO|MB_ICONWARNING) == IDYES {
+			// O -n apaga as constraints dos metadados do banco restaurado, entao
+			// o DDL precisa ser extraido antes. A falha aqui so vira aviso: o
+			// restore sem constraints continua melhor que nenhum restore.
+			recoveryDir := filepath.Dir(testPath)
+			constraints := preserveConstraintsBeforeNoValidity(ctx, c, report, recoveryDir)
 			_ = os.Remove(testPath)
 			appendLog("Tentando restore sem constraints de validade (-n)...")
 			nvOutput, nvErr := runRecoveryCapture(ctx, "Restore sem constraints de validade (-n)...", gbak, restoreTestArgs(version, resolvedPort, c.User, c.Password, backup, testPath, false, true)...)
@@ -6498,6 +6965,7 @@ func verifyBackupByRestoreDepth(ctx context.Context, c workflowConfig, backup, t
 				report.PartialRecovery = true
 				report.action("Restore de teste concluído com -n (-no_validity): banco restaurado SEM FOREIGN KEY e SEM constraints CHECK")
 				report.warning("O banco restaurado não possui as constraints originais; recrie-as manualmente após remover ou corrigir as linhas órfãs")
+				writeOrphanRowsInspectionScript(report, recoveryDir, constraints)
 				result := restoreTestResult{Verified: true, NoValidity: true, Path: testPath, Backup: backup}
 				gstat := firebirdExe(root, version, "gstat.exe")
 				if fileExists(gstat) {

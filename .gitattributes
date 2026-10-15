@@ -6,6 +6,9 @@
 *.md text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+# Os .ps1 sao gravados em UTF-8 com BOM: o Windows PowerShell 5.1 le script
+# sem BOM usando a codepage ANSI e corrompe os acentos. O git preserva o BOM
+# como conteudo, entao a normalizacao de eol abaixo nao o remove.
 *.ps1 text eol=crlf
 *.bat text eol=crlf
 *.ico binary

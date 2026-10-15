@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory=$true)][string[]]$Path,
     [Parameter(Mandatory=$true)][string]$PfxPath,
     [Parameter(Mandatory=$true)][string]$Password,

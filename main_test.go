@@ -3,13 +3,16 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 	"unsafe"
 )
 
@@ -1409,5 +1412,331 @@ func TestMainWindowIconIsAppliedBeforeWindowIsShown(t *testing.T) {
 	block := text[mainWindowStart : mainWindowStart+mainWindowEnd]
 	if strings.Contains(block, `WS_VISIBLE`) {
 		t.Fatal("main window must be created hidden so the taskbar never sees it before the app icon is applied")
+	}
+}
+
+func TestParseConstraintDefinitionsGroupsCompositeForeignKey(t *testing.T) {
+	output := strings.Join([]string{
+		"FTB_FKC|FK_ITEM_PEDIDO|ITEM|COD_EMPRESA|PEDIDO|COD_EMPRESA|CASCADE|CASCADE",
+		"FTB_FKC|FK_ITEM_PEDIDO|ITEM|NUM_PEDIDO|PEDIDO|NUM_PEDIDO|CASCADE|CASCADE",
+		"FTB_FKC|FK_ITEM_PRODUTO|ITEM|COD_PRODUTO|PRODUTO|CODIGO||RESTRICT",
+		"FTB_CHK|CHK_QTD|ITEM|14|CHECK (QTD > 0)",
+		"FTB_CHK|CHK_QTD|ITEM|14|CHECK (QTD > 0)",
+	}, "\r\n")
+	got := parseConstraintDefinitions(output)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 constraints, got %d: %#v", len(got), got)
+	}
+	composite := got[0]
+	if composite.Name != "FK_ITEM_PEDIDO" || composite.Relation != "ITEM" || composite.RefRelation != "PEDIDO" {
+		t.Fatalf("unexpected composite FK header: %#v", composite)
+	}
+	if len(composite.Columns) != 2 || composite.Columns[0] != "COD_EMPRESA" || composite.Columns[1] != "NUM_PEDIDO" {
+		t.Fatalf("composite FK must keep both child columns in index order: %#v", composite.Columns)
+	}
+	if len(composite.RefColumns) != 2 || composite.RefColumns[1] != "NUM_PEDIDO" {
+		t.Fatalf("composite FK must keep both parent columns in index order: %#v", composite.RefColumns)
+	}
+	if composite.UpdateRule != "CASCADE" || composite.DeleteRule != "CASCADE" {
+		t.Fatalf("referential rules lost: %#v", composite)
+	}
+	check := got[2]
+	if check.Type != constraintTypeCheck || check.Name != "CHK_QTD" || check.Check != "CHECK (QTD > 0)" {
+		t.Fatalf("unexpected CHECK constraint: %#v", check)
+	}
+}
+
+func TestBuildConstraintsDDLScriptRecreatesForeignKeyAndCheck(t *testing.T) {
+	script := buildConstraintsDDLScript([]constraintDefinition{
+		{
+			Name: "FK_ITEM_PEDIDO", Relation: "ITEM", Type: constraintTypeForeignKey,
+			Columns: []string{"COD_EMPRESA", "NUM_PEDIDO"}, RefRelation: "PEDIDO", RefColumns: []string{"COD_EMPRESA", "NUM_PEDIDO"},
+			UpdateRule: "CASCADE", DeleteRule: "RESTRICT",
+		},
+		{Name: "CHK_QTD", Relation: "ITEM", Type: constraintTypeCheck, Check: "CHECK (QTD > 0)"},
+		{Name: "FK_QUEBRADA", Relation: "ITEM", Type: constraintTypeForeignKey, Columns: []string{"A"}, RefRelation: "PEDIDO"},
+	}, "3")
+	wantFK := `ALTER TABLE "ITEM" ADD CONSTRAINT "FK_ITEM_PEDIDO" FOREIGN KEY ("COD_EMPRESA", "NUM_PEDIDO") REFERENCES "PEDIDO" ("COD_EMPRESA", "NUM_PEDIDO") ON UPDATE CASCADE;`
+	if !strings.Contains(script, wantFK) {
+		t.Fatalf("foreign key DDL missing or wrong.\nwant: %s\ngot:\n%s", wantFK, script)
+	}
+	if strings.Contains(script, "ON DELETE RESTRICT") {
+		t.Fatal("RESTRICT is the default rule and must not be emitted")
+	}
+	wantCheck := `ALTER TABLE "ITEM" ADD CONSTRAINT "CHK_QTD" CHECK (QTD > 0);`
+	if !strings.Contains(script, wantCheck) {
+		t.Fatalf("check constraint DDL missing.\nwant: %s\ngot:\n%s", wantCheck, script)
+	}
+	if strings.Contains(script, "FK_QUEBRADA") {
+		t.Fatal("a foreign key without matching parent columns must be skipped, not emitted broken")
+	}
+	if !strings.Contains(script, "COMMIT;") {
+		t.Fatal("script must commit each constraint")
+	}
+}
+
+func TestBuildConstraintsDDLScriptWithoutConstraintsStaysExecutable(t *testing.T) {
+	script := buildConstraintsDDLScript(nil, "3")
+	if strings.Contains(script, "ALTER TABLE") {
+		t.Fatalf("empty input must not produce DDL: %s", script)
+	}
+	if !strings.Contains(script, "/*") {
+		t.Fatalf("empty script must explain itself in a comment: %s", script)
+	}
+}
+
+func TestBuildOrphanRowsScriptOnlySelects(t *testing.T) {
+	script := buildOrphanRowsScript([]constraintDefinition{
+		{
+			Name: "FK_ITEM_PEDIDO", Relation: "ITEM", Type: constraintTypeForeignKey,
+			Columns: []string{"COD_EMPRESA", "NUM_PEDIDO"}, RefRelation: "PEDIDO", RefColumns: []string{"COD_EMPRESA", "NUM_PEDIDO"},
+		},
+		{Name: "CHK_QTD", Relation: "ITEM", Type: constraintTypeCheck, Check: "CHECK (QTD > 0)"},
+	}, "3")
+	var statements []string
+	for _, line := range strings.Split(script, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "/*") {
+			continue
+		}
+		statements = append(statements, strings.ToUpper(line))
+	}
+	executable := strings.Join(statements, "\n")
+	for _, forbidden := range []string{"DELETE", "UPDATE", "ALTER", "DROP", "INSERT"} {
+		if strings.Contains(executable, forbidden) {
+			t.Fatalf("orphan inspection script must never change data, found %q:\n%s", forbidden, script)
+		}
+	}
+	want := `SELECT F.* FROM "ITEM" F WHERE F."COD_EMPRESA" IS NOT NULL AND F."NUM_PEDIDO" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "PEDIDO" P WHERE P."COD_EMPRESA" = F."COD_EMPRESA" AND P."NUM_PEDIDO" = F."NUM_PEDIDO");`
+	if !strings.Contains(script, want) {
+		t.Fatalf("orphan query missing or wrong.\nwant: %s\ngot:\n%s", want, script)
+	}
+	if !strings.Contains(script, `SELECT COUNT(*) FROM "ITEM" F WHERE`) {
+		t.Fatalf("orphan script must count the orphan rows first:\n%s", script)
+	}
+	if strings.Contains(script, "CHK_QTD") {
+		t.Fatal("CHECK constraints have no parent rows to inspect and must be skipped")
+	}
+}
+
+func TestBuildOrphanRowsScriptWithoutForeignKeys(t *testing.T) {
+	script := buildOrphanRowsScript(nil, "3")
+	if strings.Contains(script, "SELECT") {
+		t.Fatalf("empty input must not produce queries: %s", script)
+	}
+}
+
+func TestConstraintsExtractionScriptReadsSystemTables(t *testing.T) {
+	script := constraintsExtractionScript()
+	for _, want := range []string{
+		"RDB$RELATION_CONSTRAINTS",
+		"RDB$REF_CONSTRAINTS",
+		"RDB$INDEX_SEGMENTS",
+		"RDB$CHECK_CONSTRAINTS",
+		"RDB$TRIGGERS",
+		"FTB_FKC|",
+		"FTB_CHK|",
+		"QUIT;",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("constraint extraction script missing %q", want)
+		}
+	}
+}
+
+func TestNoValidityWarningsPointToTheGeneratedScripts(t *testing.T) {
+	if got := noValidityConstraintWarnings(recoveryReport{}); got != nil {
+		t.Fatalf("a normal restore must not emit -n warnings: %#v", got)
+	}
+	joined := strings.Join(noValidityConstraintWarnings(recoveryReport{
+		NoValidityRestore:    true,
+		ConstraintsScript:    `C:\BKP\RECOVERY_X\CONSTRAINTS_ORIGINAIS.sql`,
+		ConstraintsExtracted: 7,
+		OrphanRowsScript:     `C:\BKP\RECOVERY_X\LINHAS_ORFAS.sql`,
+	}), "\n")
+	for _, want := range []string{
+		"NÃO existem no banco restaurado",
+		`C:\BKP\RECOVERY_X\CONSTRAINTS_ORIGINAIS.sql`,
+		`C:\BKP\RECOVERY_X\LINHAS_ORFAS.sql`,
+		"apto para produção",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("-n warnings missing %q:\n%s", want, joined)
+		}
+	}
+	fallback := strings.Join(noValidityConstraintWarnings(recoveryReport{NoValidityRestore: true}), "\n")
+	if !strings.Contains(fallback, "backup anterior") {
+		t.Fatalf("without any extracted DDL the report must say where else to get it:\n%s", fallback)
+	}
+}
+
+func TestWindowsBuildScriptsAreUTF8WithBOM(t *testing.T) {
+	// O Windows PowerShell 5.1 le arquivos .ps1 sem BOM usando a codepage ANSI
+	// do sistema, o que corrompe cada acento das mensagens e das constantes
+	// comparadas pelo verificador. UTF-8 com BOM e o unico encoding que o 5.1 e
+	// o PowerShell 7 do CI interpretam da mesma forma.
+	paths := []string{
+		"tools/build.ps1",
+		"tools/prepare-resources.ps1",
+		"tools/verify-windows-build.ps1",
+		"tools/sign-windows.ps1",
+		"tools/defender-preflight.ps1",
+	}
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if !bytes.HasPrefix(data, []byte{0xEF, 0xBB, 0xBF}) {
+			t.Fatalf("%s must start with the UTF-8 BOM so Windows PowerShell 5.1 reads it as UTF-8", path)
+		}
+		if !utf8.Valid(data) {
+			t.Fatalf("%s is not valid UTF-8", path)
+		}
+	}
+}
+
+func TestWindowsBuildScriptsDecideNativeCommandsByExitCode(t *testing.T) {
+	// Com $ErrorActionPreference = "Stop", o Windows PowerShell 5.1 transforma a
+	// saida de stderr de um comando nativo (por exemplo "go: downloading ...")
+	// em NativeCommandError terminante mesmo com exit code 0. As chamadas a go e
+	// go-winres precisam passar pelo wrapper que decide pelo $LASTEXITCODE.
+	paths := []string{
+		"tools/build.ps1",
+		"tools/prepare-resources.ps1",
+	}
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		text := string(data)
+		if !strings.Contains(text, "function Invoke-NativeCommand") {
+			t.Fatalf("%s must define Invoke-NativeCommand to survive native stderr on PowerShell 5.1", path)
+		}
+		if !strings.Contains(text, `$ErrorActionPreference = "Stop"`) {
+			t.Fatalf("%s must keep $ErrorActionPreference = \"Stop\" for the rest of the script", path)
+		}
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			for _, bare := range []string{"go ", "gofmt ", "go-winres ", "& go ", "& gofmt ", "& go-winres "} {
+				if strings.HasPrefix(trimmed, bare) {
+					t.Fatalf("%s invokes a native command directly (%q); use Invoke-NativeCommand", path, trimmed)
+				}
+			}
+		}
+	}
+}
+
+func TestParseConstraintDefinitionsFlagsTruncatedCheckSource(t *testing.T) {
+	short := "CHECK (QTD > 0)"
+	long := "CHECK (" + strings.Repeat("A", constraintCheckSourceLimit) + ")"
+	output := strings.Join([]string{
+		"FTB_CHK|CHK_CURTA|ITEM|" + strconv.Itoa(len(short)) + "|" + short,
+		"FTB_CHK|CHK_LONGA|ITEM|" + strconv.Itoa(constraintCheckSourceLimit+120) + "|" + long,
+	}, "\r\n")
+	got := parseConstraintDefinitions(output)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 CHECK constraints, got %d: %#v", len(got), got)
+	}
+	if got[0].Truncated {
+		t.Fatalf("a CHECK that fits the CAST must not be flagged: %#v", got[0])
+	}
+	if !got[1].Truncated {
+		t.Fatalf("a CHECK longer than the CAST limit must be flagged as truncated: %#v", got[1])
+	}
+	names := truncatedCheckConstraints(got)
+	if len(names) != 1 || !strings.Contains(names[0], "CHK_LONGA") {
+		t.Fatalf("truncated CHECK must be reported by name: %#v", names)
+	}
+}
+
+func TestParseConstraintDefinitionsFlagsTruncationWithoutLength(t *testing.T) {
+	// Banco que nao soube informar o CHAR_LENGTH: o proprio texto no limite
+	// do CAST denuncia o corte.
+	atLimit := strings.Repeat("A", constraintCheckSourceLimit)
+	output := "FTB_CHK|CHK_SEM_TAMANHO|ITEM|?|CHECK (" + atLimit
+	got := parseConstraintDefinitions(output)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 CHECK constraint, got %d", len(got))
+	}
+	if !got[0].Truncated {
+		t.Fatalf("source at the CAST limit must be treated as truncated: %#v", got[0])
+	}
+}
+
+func TestBuildConstraintsDDLScriptCommentsOutTruncatedCheck(t *testing.T) {
+	script := buildConstraintsDDLScript([]constraintDefinition{
+		{Name: "CHK_LONGA", Relation: "ITEM", Type: constraintTypeCheck, Check: "CHECK (QTD > 0 AND DESCRICAO", Truncated: true},
+		{Name: "CHK_OK", Relation: "ITEM", Type: constraintTypeCheck, Check: "CHECK (QTD > 0)"},
+	}, "3")
+	for _, line := range strings.Split(script, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "--") || strings.HasPrefix(trimmed, "/*") {
+			continue
+		}
+		if strings.Contains(trimmed, "CHK_LONGA") {
+			t.Fatalf("a truncated CHECK must never be emitted as an executable command: %s", trimmed)
+		}
+	}
+	if !strings.Contains(script, `-- ALTER TABLE "ITEM" ADD CONSTRAINT "CHK_LONGA"`) {
+		t.Fatalf("the truncated CHECK must stay in the script, commented out:\n%s", script)
+	}
+	if !strings.Contains(script, "CORTADA") {
+		t.Fatalf("the script must say the expression came back truncated:\n%s", script)
+	}
+	if !strings.Contains(script, `ALTER TABLE "ITEM" ADD CONSTRAINT "CHK_OK" CHECK (QTD > 0);`) {
+		t.Fatalf("a complete CHECK must still be executable:\n%s", script)
+	}
+}
+
+func TestConstraintIdentifiersQuotedFollowsDialect(t *testing.T) {
+	if constraintIdentifiersQuoted("1") {
+		t.Fatal("dialect 1 treats double quotes as a string literal, so identifiers must stay unquoted")
+	}
+	for _, dialect := range []string{"3", "", " ", "2"} {
+		if !constraintIdentifiersQuoted(dialect) {
+			t.Fatalf("dialect %q must keep quoted identifiers", dialect)
+		}
+	}
+}
+
+func TestConstraintScriptsInDialect1UseNoDoubleQuotes(t *testing.T) {
+	constraints := []constraintDefinition{
+		{
+			Name: "FK_ITEM_PEDIDO", Relation: "ITEM", Type: constraintTypeForeignKey,
+			Columns: []string{"COD_EMPRESA"}, RefRelation: "PEDIDO", RefColumns: []string{"COD_EMPRESA"},
+		},
+		{Name: "CHK_QTD", Relation: "ITEM", Type: constraintTypeCheck, Check: "CHECK (QTD > 0)"},
+	}
+	ddl := buildConstraintsDDLScript(constraints, "1")
+	orphans := buildOrphanRowsScript(constraints, "1")
+	for name, script := range map[string]string{constraintsScriptName: ddl, orphanRowsScriptName: orphans} {
+		if strings.Contains(script, `"`) {
+			t.Fatalf("%s must not use double quotes in dialect 1:\n%s", name, script)
+		}
+	}
+	wantDDL := "ALTER TABLE ITEM ADD CONSTRAINT FK_ITEM_PEDIDO FOREIGN KEY (COD_EMPRESA) REFERENCES PEDIDO (COD_EMPRESA);"
+	if !strings.Contains(ddl, wantDDL) {
+		t.Fatalf("dialect 1 DDL missing or wrong.\nwant: %s\ngot:\n%s", wantDDL, ddl)
+	}
+	wantOrphan := "SELECT F.* FROM ITEM F WHERE F.COD_EMPRESA IS NOT NULL AND NOT EXISTS (SELECT 1 FROM PEDIDO P WHERE P.COD_EMPRESA = F.COD_EMPRESA);"
+	if !strings.Contains(orphans, wantOrphan) {
+		t.Fatalf("dialect 1 orphan query missing or wrong.\nwant: %s\ngot:\n%s", wantOrphan, orphans)
+	}
+	if quoted := buildConstraintsDDLScript(constraints, "3"); !strings.Contains(quoted, `ALTER TABLE "ITEM"`) {
+		t.Fatalf("dialect 3 must keep quoted identifiers:\n%s", quoted)
+	}
+}
+
+func TestConstraintsExtractionScriptAsksForTheCheckSourceLength(t *testing.T) {
+	script := constraintsExtractionScript()
+	if !strings.Contains(script, "CHAR_LENGTH(t.RDB$TRIGGER_SOURCE)") {
+		t.Fatalf("the query must read the full CHECK source length to detect truncation:\n%s", script)
+	}
+	if !strings.Contains(script, "VARCHAR("+strconv.Itoa(constraintCheckSourceLimit)+")") {
+		t.Fatalf("the CAST limit must match constraintCheckSourceLimit:\n%s", script)
 	}
 }
