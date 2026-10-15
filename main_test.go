@@ -432,6 +432,98 @@ func TestRoutineDescriptionsFitTheirControl(t *testing.T) {
 	}
 }
 
+// Caso real: DBCOM.RED era ODS 13.0 (Firebird 4.0) e a rotina estava
+// configurada para Firebird 2.5, cujo gfix so abre ate ODS 11.2.
+const unsupportedODSOutput = "unsupported on-disk structure for file C:\\REDSIS\\CLIENTES\\CS STONE\\DBCOM.RED; found 13.0, support 11.2"
+
+func TestParseUnsupportedODSReadsFirebirdRefusal(t *testing.T) {
+	found, support := parseUnsupportedODS(unsupportedODSOutput)
+	if found != "13.0" || support != "11.2" {
+		t.Fatalf("ODS lido incorretamente: found=%q support=%q", found, support)
+	}
+	if f, sup := parseUnsupportedODS("gfix: database validated"); f != "" || sup != "" {
+		t.Fatalf("saida sem recusa nao pode virar incompatibilidade: found=%q support=%q", f, sup)
+	}
+}
+
+func TestUnsupportedODSMessageNamesTheVersionToSelect(t *testing.T) {
+	found, support := parseUnsupportedODS(unsupportedODSOutput)
+	message := unsupportedODSMessage("2.5", found, support)
+	for _, want := range []string{"ODS 13.0", "Firebird 4.0", "ODS 11.2", "Versao da rotina"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("mensagem de ODS incompativel nao cita %q: %s", want, message)
+		}
+	}
+}
+
+func TestODSMapCoversEverySupportedVersion(t *testing.T) {
+	mapped := map[string]bool{}
+	for _, version := range odsFirebirdVersion {
+		mapped[version] = true
+	}
+	for _, version := range versions {
+		if !mapped[version] {
+			t.Fatalf("nenhum ODS conhecido aponta para Firebird %s", version)
+		}
+	}
+}
+
+func TestToolFailureSurfacesTheRealCause(t *testing.T) {
+	base := errors.New("exit status 1")
+	err := toolFailure("o diagnóstico somente leitura não pôde ser concluído", base, unsupportedODSOutput)
+	text := err.Error()
+	for _, want := range []string{"unsupported on-disk structure", "found 13.0, support 11.2", "exit status 1"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("erro perdeu %q: %s", want, text)
+		}
+	}
+	if !errors.Is(err, base) {
+		t.Fatal("toolFailure precisa preservar o erro original")
+	}
+	if detail := toolFailureDetail("COMANDO: gfix.exe -v\n\nfalha real\n"); detail != "falha real" {
+		t.Fatalf("toolFailureDetail deveria pular o eco do comando: %q", detail)
+	}
+}
+
+func TestReportDoesNotClaimCleanDiagnosticWhenItNeverRan(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "RELATORIO_RECUPERACAO.txt")
+	r := recoveryReport{
+		ReportPath:    path,
+		Source:        `C:\Redsis\DBCOM.RED`,
+		SourceVersion: "2.5",
+		Started:       time.Now(),
+		Finished:      time.Now(),
+		FinalState:    "FALHA / RECUPERAÇÃO NÃO CONCLUÍDA",
+	}
+	r.fail("o diagnóstico somente leitura não pôde ser concluído")
+	if err := writeRecoveryReport(r); err != nil {
+		t.Fatalf("writeRecoveryReport: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(text, "nenhuma corrupção estrutural foi reportada") {
+		t.Fatalf("relatório afirma diagnóstico limpo sem diagnóstico: %s", text)
+	}
+	if !strings.Contains(text, "DIAGNÓSTICO NÃO CONCLUÍDO") {
+		t.Fatalf("relatório não avisa que o diagnóstico não rodou: %s", text)
+	}
+
+	r.DiagnosticDone = true
+	if err := writeRecoveryReport(r); err != nil {
+		t.Fatalf("writeRecoveryReport: %v", err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "nenhuma corrupção estrutural foi reportada") {
+		t.Fatalf("diagnóstico concluído e limpo deve continuar sendo informado: %s", data)
+	}
+}
+
 func TestSectionHeadersDoNotHideGroupboxTopBorder(t *testing.T) {
 	limits := map[int]int32{
 		idSectionRoutine:  170,

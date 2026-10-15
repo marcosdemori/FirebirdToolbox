@@ -2864,6 +2864,9 @@ func runPreflight(c workflowConfig) (preflightReport, error) {
 		if err := checkEndpointPreflight("Firebird da rotina", c.SourceVersion, c.FbSource, c.SourcePort, &report); err != nil {
 			return report, err
 		}
+		if err := checkSourceODS(c, &report); err != nil {
+			return report, err
+		}
 		if err := ensureWritableDir(c.BackupDir); err != nil {
 			return report, fmt.Errorf("a pasta de backup não permite gravação: %w", err)
 		}
@@ -3081,6 +3084,125 @@ func parseDatabaseHeader(output string) databaseHeader {
 		}
 	}
 	return h
+}
+
+// odsFirebirdVersion traduz o ODS gravado no header do banco para a versao do
+// Firebird que o criou. O numero do ODS nao muda com service pack, entao e o
+// unico dado do arquivo que diz com seguranca qual versao consegue abri-lo.
+var odsFirebirdVersion = map[string]string{
+	"10.0": "1.0",
+	"10.1": "1.5",
+	"11.0": "2.0",
+	"11.1": "2.1",
+	"11.2": "2.5",
+	"12.0": "3.0",
+	"13.0": "4.0",
+	"13.1": "5.0",
+}
+
+// parseUnsupportedODS le a recusa que gfix e gstat emitem quando o arquivo foi
+// criado por uma versao mais nova do que a do utilitario, por exemplo
+// "unsupported on-disk structure for file X; found 13.0, support 11.2".
+func parseUnsupportedODS(output string) (found, support string) {
+	lower := strings.ToLower(output)
+	if !strings.Contains(lower, "unsupported on-disk structure") {
+		return "", ""
+	}
+	idx := strings.Index(lower, "found ")
+	if idx < 0 {
+		return "", ""
+	}
+	rest := output[idx+len("found "):]
+	found = strings.TrimSpace(strings.SplitN(rest, ",", 2)[0])
+	if sup := strings.Index(strings.ToLower(rest), "support "); sup >= 0 {
+		tail := rest[sup+len("support "):]
+		support = strings.TrimSpace(strings.Trim(strings.SplitN(tail, "\n", 2)[0], " \r.;"))
+	}
+	return found, support
+}
+
+// unsupportedODSMessage transforma a recusa tecnica do Firebird em uma
+// instrucao acionavel, dizendo qual versao o operador deve selecionar.
+func unsupportedODSMessage(selected, found, support string) string {
+	message := "o banco de origem e ODS " + found
+	if version := odsFirebirdVersion[found]; version != "" {
+		message += " (Firebird " + version + ")"
+	}
+	message += ", mas o Firebird " + selected + " selecionado em \"Versao da rotina\""
+	if support != "" {
+		message += " so abre ate ODS " + support
+	} else {
+		message += " nao consegue abri-lo"
+	}
+	if version := odsFirebirdVersion[found]; version != "" {
+		message += "; selecione Firebird " + version + " e aponte a instalacao correspondente"
+	} else {
+		message += "; selecione a versao do Firebird que criou o banco"
+	}
+	return message
+}
+
+// toolFailureDetail extrai da saida do utilitario Firebird a primeira linha
+// util para o operador. Sem ela o usuario recebe apenas "exit status 1" e a
+// causa real fica escondida no log tecnico.
+func toolFailureDetail(output string) string {
+	for _, raw := range strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "COMANDO:") {
+			continue
+		}
+		return line
+	}
+	return ""
+}
+
+// toolFailure junta a mensagem de contexto, a linha que o utilitario escreveu e
+// o codigo de saida, preservando o erro original para quem usar errors.Is.
+func toolFailure(message string, err error, output string) error {
+	detail := toolFailureDetail(output)
+	switch {
+	case detail != "" && err != nil:
+		return fmt.Errorf("%s: %s (%w)", message, detail, err)
+	case detail != "":
+		return errors.New(message + ": " + detail)
+	case err != nil:
+		return fmt.Errorf("%s: %w", message, err)
+	default:
+		return errors.New(message)
+	}
+}
+
+// checkSourceODS pede ao proprio Firebird selecionado que leia o header do
+// banco. E a unica checagem confiavel de compatibilidade: se essa instalacao
+// nao abre o arquivo, a rotina inteira falharia mais adiante, depois de ja ter
+// criado pastas e copias.
+func checkSourceODS(c workflowConfig, report *preflightReport) error {
+	gstat := firebirdExe(c.FbSource, c.SourceVersion, "gstat.exe")
+	if !fileExists(gstat) {
+		report.Warnings = append(report.Warnings, "gstat.exe nao foi encontrado; o ODS do banco de origem nao pode ser conferido antes da execucao")
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	output, err := runCommandCapture(ctx, gstat, "-h", c.Source)
+	if found, support := parseUnsupportedODS(output); found != "" {
+		return errors.New(unsupportedODSMessage(c.SourceVersion, found, support))
+	}
+	if err != nil {
+		report.Warnings = append(report.Warnings, "nao foi possivel ler o header do banco de origem com gstat; a compatibilidade sera conferida durante a execucao")
+		return nil
+	}
+	h := parseDatabaseHeader(output)
+	if h.ODS == "" {
+		report.Warnings = append(report.Warnings, "o gstat nao informou o ODS do banco de origem")
+		return nil
+	}
+	check := "banco de origem legivel pelo Firebird " + c.SourceVersion + " | ODS " + h.ODS
+	if version := odsFirebirdVersion[h.ODS]; version != "" {
+		check += " (Firebird " + version + ")"
+	}
+	report.Checks = append(report.Checks, check)
+	return nil
 }
 
 func validateRestoredHeader(ctx context.Context, c workflowConfig) error {
@@ -5249,6 +5371,7 @@ type recoveryReport struct {
 	OriginalSHA256            string
 	OriginalSize              int64
 	Diagnostic                recoveryStats
+	DiagnosticDone            bool
 	PreMendDiagnostic         recoveryStats
 	PostMendDiagnostic        recoveryStats
 	PostMendChecked           bool
@@ -5359,13 +5482,20 @@ func writeRecoveryReport(r recoveryReport) error {
 	}
 
 	b.WriteString("\r\nDIAGNÓSTICO INICIAL\r\n")
-	b.WriteString("Classificação: " + r.Diagnostic.Summary() + "\r\n")
-	b.WriteString(fmt.Sprintf("Erros de registro: %d\r\n", r.Diagnostic.RecordErrors))
-	b.WriteString(fmt.Sprintf("Erros de índice: %d\r\n", r.Diagnostic.IndexErrors))
-	b.WriteString(fmt.Sprintf("Erros de transação: %d\r\n", r.Diagnostic.TransactionErrors))
-	b.WriteString(fmt.Sprintf("Erros de BLOB: %d\r\n", r.Diagnostic.BlobErrors))
-	b.WriteString(fmt.Sprintf("Erros de página: %d\r\n", r.Diagnostic.DatabaseErrors))
-	b.WriteString(fmt.Sprintf("Transações em limbo detectadas: %d\r\n", r.LimboCount))
+	// Contador zerado não é banco saudável quando o diagnóstico nem chegou a
+	// rodar. Dizer "nenhuma corrupção" nesse caso é afirmar o que não se sabe.
+	if !r.DiagnosticDone {
+		b.WriteString("Classificação: DIAGNÓSTICO NÃO CONCLUÍDO - o estado do banco não foi avaliado\r\n")
+		b.WriteString("Os contadores abaixo não foram medidos e não devem ser lidos como ausência de corrupção.\r\n")
+	} else {
+		b.WriteString("Classificação: " + r.Diagnostic.Summary() + "\r\n")
+		b.WriteString(fmt.Sprintf("Erros de registro: %d\r\n", r.Diagnostic.RecordErrors))
+		b.WriteString(fmt.Sprintf("Erros de índice: %d\r\n", r.Diagnostic.IndexErrors))
+		b.WriteString(fmt.Sprintf("Erros de transação: %d\r\n", r.Diagnostic.TransactionErrors))
+		b.WriteString(fmt.Sprintf("Erros de BLOB: %d\r\n", r.Diagnostic.BlobErrors))
+		b.WriteString(fmt.Sprintf("Erros de página: %d\r\n", r.Diagnostic.DatabaseErrors))
+		b.WriteString(fmt.Sprintf("Transações em limbo detectadas: %d\r\n", r.LimboCount))
+	}
 
 	if r.PostMendChecked {
 		b.WriteString("\r\nDIAGNÓSTICO PÓS-MEND\r\n")
@@ -7098,15 +7228,18 @@ func runAdvancedRecovery(ctx context.Context, c workflowConfig) (retErr error) {
 		stats = recoveryStats{}
 	} else {
 		if diagnosticErr != nil && !stats.HasCorruption() {
-			return fmt.Errorf("o diagnóstico somente leitura não pôde ser concluído: %w", diagnosticErr)
+			return toolFailure("o diagnóstico somente leitura não pôde ser concluído", diagnosticErr, diagnosticOutput)
 		}
 		if toolOutputHasOperationalFailure(diagnosticOutput) && !stats.HasCorruption() {
-			return errors.New("o gfix não conseguiu concluir o diagnóstico; consulte o log técnico")
+			return toolFailure("o gfix não conseguiu concluir o diagnóstico", nil, diagnosticOutput)
 		}
 		appendLog("Diagnóstico: " + stats.Summary() + ".")
 		report.action("Diagnóstico gfix -validate -full -no_update executado no banco original")
 	}
 	report.Diagnostic = stats
+	// Só é diagnóstico de verdade quando o gfix rodou no original. Na variante
+	// legada, sem -no_update, o estado ainda não foi avaliado.
+	report.DiagnosticDone = readOnlyOnOriginal
 
 	setProgress(22, "Verificando transações em limbo...")
 	limboOutput, limboErr := runRecoveryCapture(ctx, "Etapa 2: Verificando transações em limbo...", gfix, "-user", c.User, "-pass", c.Password, "-list", originalConn)
@@ -7166,7 +7299,7 @@ func runAdvancedRecovery(ctx context.Context, c workflowConfig) (retErr error) {
 	copyCheckOutput, copyCheckErr := runRecoveryCapture(ctx, copyCheckLabel, gfix, copyCheckArgs...)
 	copyStats := parseRecoveryStats(copyCheckOutput)
 	if copyCheckErr != nil && !copyStats.HasCorruption() {
-		return fmt.Errorf("a cópia de trabalho foi criada, mas o Firebird não conseguiu abri-la com segurança: %w", copyCheckErr)
+		return toolFailure("a cópia de trabalho foi criada, mas o Firebird não conseguiu abri-la com segurança", copyCheckErr, copyCheckOutput)
 	}
 	if toolOutputHasOperationalFailure(copyCheckOutput) && !copyStats.HasCorruption() {
 		return errors.New("a cópia de trabalho foi criada, mas não ficou acessível ao serviço Firebird; escolha uma pasta de backup acessível ao serviço")
@@ -7174,6 +7307,7 @@ func runAdvancedRecovery(ctx context.Context, c workflowConfig) (retErr error) {
 	stats = mergeRecoveryStats(stats, copyStats)
 	report.Diagnostic = stats
 	report.PreMendDiagnostic = stats
+	report.DiagnosticDone = true
 	if readOnlyOnOriginal {
 		report.action("Cópia de trabalho conferida em modo somente leitura antes do reparo")
 	} else {
