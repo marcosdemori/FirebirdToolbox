@@ -647,6 +647,97 @@ func TestSkipDataTargetComesFromTheGbakLog(t *testing.T) {
 	}
 }
 
+// Segunda rodada real do DBCOM.RED: com EMAIL fora, o gbak passou da pagina
+// 413591 e so quebrou adiante, em RDS_DAO_OBJ. E esse o sinal que o acumulo
+// precisa aproveitar em vez de desistir.
+const secondRoundGbakOutput = `gbak:    writing data for table CENQIPI
+gbak:129 records written
+gbak:    writing index RDB$PRIMARY141
+gbak:    writing data for table RDS_DAO_OBJ
+gbak: ERROR:internal Firebird consistency check (cannot find record fragment (248), file: dpm.cpp line: 1454)
+gbak: ERROR:gds_$receive failed
+gbak:Exiting before completion due to errors
+gbak:297 records written
+`
+
+func TestSkipDataRegexEscapesEveryRelation(t *testing.T) {
+	if got := skipDataRegexFor([]string{"EMAIL"}); got != "EMAIL" {
+		t.Fatalf("uma relacao nao precisa de grupo: %q", got)
+	}
+	got := skipDataRegexFor([]string{"EMAIL", "RDS_DAO_OBJ"})
+	if got != "(EMAIL|RDS[_]DAO[_]OBJ)" {
+		t.Fatalf("regex acumulada incorreta: %q", got)
+	}
+	// Sem escapar, "_" casaria com qualquer caractere e levaria tabelas vizinhas
+	// junto.
+	if strings.Contains(got, "RDS_DAO_OBJ") {
+		t.Fatalf("o underscore precisa ser escapado como [_]: %q", got)
+	}
+	if got := skipDataRegexFor(nil); got != "" {
+		t.Fatalf("lista vazia nao gera regex: %q", got)
+	}
+}
+
+func TestNextRelationToSkipAdvancesOnlyOnNewSafeRelations(t *testing.T) {
+	if got := nextRelationToSkip(secondRoundGbakOutput, []string{"EMAIL"}); got != "RDS_DAO_OBJ" {
+		t.Fatalf("a segunda rodada deveria apontar RDS_DAO_OBJ, veio %q", got)
+	}
+	// Mesma tabela de novo significa que excluir nao adiantou: o laco precisa
+	// parar em vez de repetir a mesma tentativa para sempre.
+	if got := nextRelationToSkip(secondRoundGbakOutput, []string{"EMAIL", "RDS_DAO_OBJ"}); got != "" {
+		t.Fatalf("relacao ja excluida nao pode gerar nova rodada: %q", got)
+	}
+	if got := nextRelationToSkip("gbak: ERROR: writing data for table RDB$RELATIONS", nil); got != "" {
+		t.Fatalf("tabela de sistema nao pode entrar no -skip_data: %q", got)
+	}
+	if got := nextRelationToSkip("gbak:Exiting before completion due to errors", nil); got != "" {
+		t.Fatalf("saida sem relacao identificavel nao pode gerar rodada: %q", got)
+	}
+}
+
+func TestAutomaticSkipHasABoundedLimit(t *testing.T) {
+	if maxAutomaticSkipRelations < 2 {
+		t.Fatalf("o acumulo precisa permitir mais de uma tabela: %d", maxAutomaticSkipRelations)
+	}
+	if maxAutomaticSkipRelations > 16 {
+		t.Fatalf("o limite precisa impedir que o Toolbox esvazie o banco sozinho: %d", maxAutomaticSkipRelations)
+	}
+}
+
+func TestReportListsEverySkippedRelation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "RELATORIO_RECUPERACAO.txt")
+	r := recoveryReport{
+		ReportPath:        path,
+		Source:            `C:\Redsis\DBCOM.RED`,
+		SourceVersion:     "5.0",
+		Started:           time.Now(),
+		Finished:          time.Now(),
+		DiagnosticDone:    true,
+		SuspectedRelation: "EMAIL",
+		SkipData:          skipDataRegexFor([]string{"EMAIL", "RDS_DAO_OBJ"}),
+		SkippedRelations:  []string{"EMAIL", "RDS_DAO_OBJ"},
+		PartialRecovery:   true,
+		FinalState:        "RECUPERAÇÃO PARCIAL",
+	}
+	if err := writeRecoveryReport(r); err != nil {
+		t.Fatalf("writeRecoveryReport: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"Tabelas excluídas (2): EMAIL, RDS_DAO_OBJ",
+		"o dano está espalhado por mais de um ponto",
+		"não fazem parte do backup recuperado",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("relatório não lista as tabelas excluídas, falta %q: %s", want, text)
+		}
+	}
+}
+
 func TestSectionHeadersDoNotHideGroupboxTopBorder(t *testing.T) {
 	limits := map[int]int32{
 		idSectionRoutine:  170,

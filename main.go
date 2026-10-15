@@ -4200,6 +4200,52 @@ func suspectedRelationFromGbak(output string) string {
 	return ""
 }
 
+// maxAutomaticSkipRelations limita quantas tabelas o Toolbox exclui sozinho do
+// backup de recuperacao. Cada rodada descarta os dados de mais uma tabela, e um
+// banco com corrupcao espalhada poderia consumir a lista inteira sem nunca
+// fechar o backup. O limite existe para a tentativa parar e devolver a decisao
+// ao operador em vez de ir esvaziando o banco em silencio.
+const maxAutomaticSkipRelations = 8
+
+// skipDataRegexFor monta a regex do -skip_data para varias relacoes. Cada nome
+// e escapado individualmente, porque no padrao do -skip_data o "_" casa com
+// qualquer caractere e pegaria tabelas vizinhas.
+func skipDataRegexFor(relations []string) string {
+	parts := make([]string, 0, len(relations))
+	for _, relation := range relations {
+		if literal := sqlRegexLiteral(relation); literal != "" {
+			parts = append(parts, literal)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	return "(" + strings.Join(parts, "|") + ")"
+}
+
+func containsRelation(relations []string, name string) bool {
+	for _, relation := range relations {
+		if strings.EqualFold(relation, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// nextRelationToSkip devolve a proxima tabela a excluir depois de uma rodada que
+// falhou, ou "" quando nao ha progresso possivel: nenhuma relacao identificada,
+// relacao de sistema, ou a mesma que ja estava na lista.
+func nextRelationToSkip(output string, alreadySkipped []string) string {
+	next := suspectedRelationFromGbak(output)
+	if next == "" || !safeRelationForSkip(next) || containsRelation(alreadySkipped, next) {
+		return ""
+	}
+	return next
+}
+
 func safeRelationForSkip(name string) bool {
 	name = strings.ToUpper(strings.TrimSpace(name))
 	if name == "" {
@@ -5412,6 +5458,7 @@ type recoveryReport struct {
 	SuspectedRelation         string
 	SuspectedRelationSource   string
 	EngineCrashRelation       string
+	SkippedRelations          []string
 	IndexRescueAttempted      bool
 	IndexesDisabled           []string
 	RowRescueAttempted        bool
@@ -5543,6 +5590,14 @@ func writeRecoveryReport(r recoveryReport) error {
 		b.WriteString("Regex usada no -skip_data: " + r.SkipData + "\r\n")
 		if r.SuspectedRelation != "" {
 			b.WriteString("Relação suspeita: " + r.SuspectedRelation + "\r\n")
+		}
+		// A lista completa importa mais que a regex: e ela que diz, tabela por
+		// tabela, o que o operador nao tem no backup.
+		if len(r.SkippedRelations) > 0 {
+			b.WriteString(fmt.Sprintf("Tabelas excluídas (%d): %s\r\n", len(r.SkippedRelations), strings.Join(r.SkippedRelations, ", ")))
+		}
+		if len(r.SkippedRelations) > 1 {
+			b.WriteString("Cada tabela acima foi acrescentada depois de uma nova falha do gbak: o dano está espalhado por mais de um ponto.\r\n")
 		}
 		b.WriteString("ATENÇÃO: os dados das relações correspondentes não fazem parte do backup recuperado.\r\n")
 	}
@@ -7493,14 +7548,42 @@ func runAdvancedRecovery(ctx context.Context, c workflowConfig) (retErr error) {
 		}
 
 		if backupErr != nil && versionNumber(c.SourceVersion) >= 3.0 && normalizeSkipData(c.SkipData) == "" && safeRelationForSkip(report.SuspectedRelation) {
-			skipRegex := sqlRegexLiteral(report.SuspectedRelation)
-			msg := "O gbak continua falhando ao processar a relação:\n\n" + report.SuspectedRelation + "\n\nO Toolbox pode criar um backup-base sem os dados dessa relação e, em seguida, tentar copiar de volta os registros legíveis para um banco temporário limpo.\n\nPrimeiro será usado -skip_data apenas como etapa intermediária. Depois o Toolbox tentará recuperar os registros da tabela por leitura NATURAL e, se necessário, por faixas da chave primária.\n\nDeseja iniciar esse resgate?"
+			msg := fmt.Sprintf("O gbak continua falhando ao processar a relação:\n\n%s\n\nO Toolbox pode criar um backup-base sem os dados dessa relação e, em seguida, tentar copiar de volta os registros legíveis para um banco temporário limpo.\n\nSe o backup voltar a falhar em outra tabela, o Toolbox acrescenta essa tabela às excluídas e tenta de novo, até %d tabelas. Todas as tabelas excluídas aparecem no relatório final.\n\nPrimeiro será usado -skip_data apenas como etapa intermediária. Depois, se apenas uma tabela tiver sido excluída, o Toolbox tentará recuperar os registros dela por leitura NATURAL e, se necessário, por faixas da chave primária.\n\nDeseja iniciar esse resgate?", report.SuspectedRelation, maxAutomaticSkipRelations)
 			if messageBox("Tentativa de recuperação parcial", msg, MB_YESNO|MB_ICONWARNING) == IDYES {
-				partialConfig := c
-				partialConfig.SkipData = skipRegex
-				_ = os.Remove(backup)
-				appendLog("Criando backup-base sem os dados de " + report.SuspectedRelation + " para tentar o resgate dos registros...")
-				partialOutput, partialErr := runRecoveryCapture(ctx, "Repetindo backup com -skip_data "+skipRegex+"...", gbak, advancedBackupArgs(partialConfig, workingConn, backup, needsRecoveryFlags, usedLimbo)...)
+				// Corrupcao espalhada derruba o gbak em uma tabela de cada vez: a
+				// saida so denuncia a proxima quando a anterior deixa de bloquear.
+				// Por isso o -skip_data acumula em vez de desistir na primeira.
+				skipped := []string{report.SuspectedRelation}
+				var skipRegex string
+				var partialOutput string
+				var partialErr error
+				for {
+					skipRegex = skipDataRegexFor(skipped)
+					partialConfig := c
+					partialConfig.SkipData = skipRegex
+					_ = os.Remove(backup)
+					appendLog("Criando backup-base sem os dados de " + strings.Join(skipped, ", ") + "...")
+					partialOutput, partialErr = runRecoveryCapture(ctx, "Repetindo backup com -skip_data "+skipRegex+"...", gbak, advancedBackupArgs(partialConfig, workingConn, backup, needsRecoveryFlags, usedLimbo)...)
+					if partialErr == nil && fileExists(backup) {
+						break
+					}
+					next := nextRelationToSkip(partialOutput, skipped)
+					if next == "" {
+						break
+					}
+					if len(skipped) >= maxAutomaticSkipRelations {
+						report.warning(fmt.Sprintf("O limite de %d tabelas excluídas automaticamente foi atingido; o backup ainda falhava e a tabela seguinte seria %s. Informe a regex manualmente em 'Pular tabelas (regex)' se quiser continuar excluindo.", maxAutomaticSkipRelations, next))
+						appendLog(fmt.Sprintf("Limite de %d tabelas excluídas atingido; a próxima seria %s.", maxAutomaticSkipRelations, next))
+						break
+					}
+					appendLog("O backup ainda falhou; acrescentando " + next + " às tabelas excluídas.")
+					report.action("Tabela " + next + " acrescentada ao -skip_data após nova falha do gbak")
+					skipped = append(skipped, next)
+				}
+				report.SkippedRelations = skipped
+				if len(skipped) > 1 {
+					report.warning("Foram necessárias " + strconv.Itoa(len(skipped)) + " tabelas excluídas do backup: " + strings.Join(skipped, ", ") + ". O dano não está em um único ponto.")
+				}
 				if partialErr == nil && fileExists(backup) {
 					backupErr = nil
 					backupOutput = partialOutput
@@ -7513,47 +7596,62 @@ func runAdvancedRecovery(ctx context.Context, c workflowConfig) (retErr error) {
 						report.warning("Não foi possível renomear o backup-base para identificação forense: " + renameErr.Error())
 					}
 					report.BasePartialBackup = baseBackup
-					report.warning("Backup-base criado com -skip_data para permitir tentativa de resgate dos registros de " + report.SuspectedRelation)
 					report.action("Backup-base criado com -skip_data preservando as demais tabelas")
-					appendLog("✓ Backup-base criado. Tentando recuperar os registros de " + report.SuspectedRelation + "...")
-
-					rowResult, rowErr := attemptRowRescue(ctx, c, resolvedPort, workingCopy, baseBackup, backup, report.SuspectedRelation, report.IndexesDisabled)
-					report.RowRescueAttempted = rowResult.Attempted
-					report.RowRescueRelation = report.SuspectedRelation
-					report.RowRescueRecovered = rowResult.Recovered
-					report.RowRescueLostKeys = append(report.RowRescueLostKeys, rowResult.LostKeys...)
-					report.RowRescueComplete = rowResult.Complete
-					report.RowRescueStage = rowResult.StagePath
-					if rowErr == nil && rowResult.Backup != "" && fileExists(rowResult.Backup) {
-						backup = rowResult.Backup
-						backupErr = nil
-						report.action(fmt.Sprintf("Resgate de registros de %s concluído: %d registro(s) copiado(s)", report.SuspectedRelation, rowResult.Recovered))
-						if rowResult.Complete {
-							report.PartialRecovery = false
-							report.SkipData = ""
-							report.warning("O -skip_data foi usado apenas no backup-base intermediário; os registros da relação foram reinseridos no banco limpo antes do backup final")
-							appendLog(fmt.Sprintf("✓ %d registro(s) de %s recuperados. Nenhuma chave foi perdida.", rowResult.Recovered, report.SuspectedRelation))
-						} else {
-							report.PartialRecovery = true
-							report.SkipData = ""
-							report.warning(fmt.Sprintf("Resgate parcial de %s: %d registro(s) recuperado(s), %d chave(s) não recuperada(s)", report.SuspectedRelation, rowResult.Recovered, len(rowResult.LostKeys)))
-							appendLog(fmt.Sprintf("ATENÇÃO: %d registro(s) recuperado(s) de %s; %d chave(s) não puderam ser copiadas.", rowResult.Recovered, report.SuspectedRelation, len(rowResult.LostKeys)))
-							if messageBox("Resgate parcial de registros", fmt.Sprintf("Foram recuperados %d registros de %s, mas %d chave(s) não puderam ser copiadas.\n\nDeseja continuar com esta recuperação parcial?", rowResult.Recovered, report.SuspectedRelation, len(rowResult.LostKeys)), MB_YESNO|MB_ICONWARNING) != IDYES {
-								backupErr = errors.New("recuperação parcial de registros não autorizada pelo usuário")
-							}
-						}
+					if len(skipped) > 1 {
+						report.warning("Backup-base criado com -skip_data excluindo os dados de " + strings.Join(skipped, ", "))
+						appendLog("✓ Backup-base criado sem os dados de " + strings.Join(skipped, ", ") + ".")
 					} else {
-						if rowErr == nil {
-							rowErr = errors.New("o resgate terminou sem gerar o backup pós-resgate esperado")
-						}
-						report.warning("O backup-base foi criado, mas o resgate automático dos registros falhou: " + rowErr.Error())
-						appendLog("ATENÇÃO: não foi possível recuperar os registros automaticamente: " + rowErr.Error())
-						if messageBox("Resgate dos registros falhou", "O restante do banco foi preservado, mas o resgate automático dos registros de "+report.SuspectedRelation+" falhou.\n\nDeseja continuar usando o backup-base SEM os dados dessa relação?", MB_YESNO|MB_ICONWARNING) != IDYES {
-							backupErr = rowErr
+						report.warning("Backup-base criado com -skip_data para permitir tentativa de resgate dos registros de " + report.SuspectedRelation)
+						appendLog("✓ Backup-base criado. Tentando recuperar os registros de " + report.SuspectedRelation + "...")
+					}
+
+					// attemptRowRescue reinsere os registros de UMA relacao. Com varias
+					// excluidas, anunciar resgate seria afirmar mais do que foi feito:
+					// o backup fica parcial e declarado assim, tabela por tabela.
+					if len(skipped) > 1 {
+						backup = baseBackup
+						report.PartialRecovery = true
+						report.warning("O resgate automático de registros não foi tentado porque mais de uma tabela precisou ser excluída; os dados de " + strings.Join(skipped, ", ") + " NÃO fazem parte do backup")
+						appendLog("Resgate de registros não aplicável: " + strconv.Itoa(len(skipped)) + " tabelas excluídas do backup.")
+					} else {
+						rowResult, rowErr := attemptRowRescue(ctx, c, resolvedPort, workingCopy, baseBackup, backup, report.SuspectedRelation, report.IndexesDisabled)
+						report.RowRescueAttempted = rowResult.Attempted
+						report.RowRescueRelation = report.SuspectedRelation
+						report.RowRescueRecovered = rowResult.Recovered
+						report.RowRescueLostKeys = append(report.RowRescueLostKeys, rowResult.LostKeys...)
+						report.RowRescueComplete = rowResult.Complete
+						report.RowRescueStage = rowResult.StagePath
+						if rowErr == nil && rowResult.Backup != "" && fileExists(rowResult.Backup) {
+							backup = rowResult.Backup
+							backupErr = nil
+							report.action(fmt.Sprintf("Resgate de registros de %s concluído: %d registro(s) copiado(s)", report.SuspectedRelation, rowResult.Recovered))
+							if rowResult.Complete {
+								report.PartialRecovery = false
+								report.SkipData = ""
+								report.warning("O -skip_data foi usado apenas no backup-base intermediário; os registros da relação foram reinseridos no banco limpo antes do backup final")
+								appendLog(fmt.Sprintf("✓ %d registro(s) de %s recuperados. Nenhuma chave foi perdida.", rowResult.Recovered, report.SuspectedRelation))
+							} else {
+								report.PartialRecovery = true
+								report.SkipData = ""
+								report.warning(fmt.Sprintf("Resgate parcial de %s: %d registro(s) recuperado(s), %d chave(s) não recuperada(s)", report.SuspectedRelation, rowResult.Recovered, len(rowResult.LostKeys)))
+								appendLog(fmt.Sprintf("ATENÇÃO: %d registro(s) recuperado(s) de %s; %d chave(s) não puderam ser copiadas.", rowResult.Recovered, report.SuspectedRelation, len(rowResult.LostKeys)))
+								if messageBox("Resgate parcial de registros", fmt.Sprintf("Foram recuperados %d registros de %s, mas %d chave(s) não puderam ser copiadas.\n\nDeseja continuar com esta recuperação parcial?", rowResult.Recovered, report.SuspectedRelation, len(rowResult.LostKeys)), MB_YESNO|MB_ICONWARNING) != IDYES {
+									backupErr = errors.New("recuperação parcial de registros não autorizada pelo usuário")
+								}
+							}
 						} else {
-							backup = baseBackup
-							report.warning("Usuário optou por continuar com o backup-base sem os dados da relação após falha do resgate")
-							report.PartialRecovery = true
+							if rowErr == nil {
+								rowErr = errors.New("o resgate terminou sem gerar o backup pós-resgate esperado")
+							}
+							report.warning("O backup-base foi criado, mas o resgate automático dos registros falhou: " + rowErr.Error())
+							appendLog("ATENÇÃO: não foi possível recuperar os registros automaticamente: " + rowErr.Error())
+							if messageBox("Resgate dos registros falhou", "O restante do banco foi preservado, mas o resgate automático dos registros de "+report.SuspectedRelation+" falhou.\n\nDeseja continuar usando o backup-base SEM os dados dessa relação?", MB_YESNO|MB_ICONWARNING) != IDYES {
+								backupErr = rowErr
+							} else {
+								backup = baseBackup
+								report.warning("Usuário optou por continuar com o backup-base sem os dados da relação após falha do resgate")
+								report.PartialRecovery = true
+							}
 						}
 					}
 				} else {
