@@ -550,12 +550,17 @@ gbak: ERROR:gds_$receive failed
 gbak:Exiting before completion due to errors
 `
 
-func TestSuspectedRelationPrefersFirebirdLogOverGbak(t *testing.T) {
+// Os dois logs respondem perguntas diferentes e nao podem ser trocados um pelo
+// outro. Prova medida em producao no DBCOM.RED: com -skip_data em CAIXA, o
+// sinal do firebird.log, o gbak travou na mesma pagina 413591 e no mesmo
+// registro 16121 do backup sem skip; com -skip_data em EMAIL, o sinal do gbak,
+// o backup passou de 413591 e so parou adiante, em outro sitio de dano.
+func TestEachLogAnswersItsOwnQuestion(t *testing.T) {
+	// "Onde o motor quebrou" - diagnostico, vem do firebird.log.
 	if got := suspectedRelationFromFirebirdLog(bugcheckFirebirdLog); got != "CAIXA" {
 		t.Fatalf("o bugcheck do firebird.log deveria apontar CAIXA, veio %q", got)
 	}
-	// O log do gbak sozinho aponta a tabela errada: e esse o motivo de o
-	// firebird.log ter prioridade.
+	// "Qual relacao bloqueia o backup" - alvo do -skip_data, vem do gbak.
 	if got := suspectedRelationFromGbak(bugcheckGbakOutput); got != "EMAIL" {
 		t.Fatalf("o log do gbak deveria apontar EMAIL, veio %q", got)
 	}
@@ -564,13 +569,39 @@ func TestSuspectedRelationPrefersFirebirdLogOverGbak(t *testing.T) {
 	}
 }
 
-func TestSuspectedRelationFallsBackToGbakWithoutBugcheck(t *testing.T) {
-	logText := "Database: C:\\DADOS\\X.FDB\n\tValidation started\n"
-	if got := suspectedRelationFromFirebirdLog(logText); got != "" {
-		t.Fatalf("sem bugcheck o firebird.log nao pode nomear relacao: %q", got)
+func TestReportSeparatesSkipTargetFromEngineCrash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "RELATORIO_RECUPERACAO.txt")
+	r := recoveryReport{
+		ReportPath:              path,
+		Source:                  `C:\Redsis\DBCOM.RED`,
+		SourceVersion:           "5.0",
+		Started:                 time.Now(),
+		Finished:                time.Now(),
+		DiagnosticDone:          true,
+		SuspectedRelation:       suspectedRelationFromGbak(bugcheckGbakOutput),
+		SuspectedRelationSource: "log do gbak",
+		EngineCrashRelation:     suspectedRelationFromFirebirdLog(bugcheckFirebirdLog),
+		FinalState:              "NÃO RECUPERÁVEL COM FERRAMENTAS PADRÃO",
 	}
-	if got := suspectedRelationFromGbak(bugcheckGbakOutput); got == "" {
-		t.Fatal("sem sinal no firebird.log o log do gbak ainda precisa servir de fallback")
+	if r.SuspectedRelation != "EMAIL" || r.EngineCrashRelation != "CAIXA" {
+		t.Fatalf("montagem do caso errada: skip=%q bugcheck=%q", r.SuspectedRelation, r.EngineCrashRelation)
+	}
+	if err := writeRecoveryReport(r); err != nil {
+		t.Fatalf("writeRecoveryReport: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"Possível relação afetada: EMAIL (identificada pelo log do gbak)",
+		"Tabela onde o motor sofreu bugcheck: CAIXA (firebird.log)",
+		"As duas tabelas são diferentes",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("relatório não separa os dois sinais, falta %q: %s", want, text)
+		}
 	}
 }
 
@@ -592,6 +623,27 @@ func TestIndexCorruptionNeedsIndexOnTheExpectedSide(t *testing.T) {
 	}
 	if gbakLooksLikeIndexCorruption("gbak:    writing index RDB$PRIMARY214\ngbak: ERROR:    wrong page type") {
 		t.Fatal("a mencao rotineira a \"writing index\" nao pode virar suspeita de indice")
+	}
+}
+
+// Guarda de fiacao: ja foi tentado uma vez ligar o alvo do -skip_data ao
+// bugcheck do firebird.log, e o resultado medido em producao foi o backup
+// travar no mesmo ponto de antes. SuspectedRelation comanda -skip_data, resgate
+// por indices e resgate por registros, entao ela so pode vir do log do gbak.
+func TestSkipDataTargetComesFromTheGbakLog(t *testing.T) {
+	data, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "report.SuspectedRelation = suspectedRelationFromGbak(backupOutput)") {
+		t.Fatal("a relação do -skip_data precisa vir de suspectedRelationFromGbak")
+	}
+	if strings.Contains(text, "report.SuspectedRelation = suspectedRelationFromFirebirdLog") {
+		t.Fatal("o bugcheck do firebird.log não pode escolher o alvo do -skip_data; ele é diagnóstico e vai para EngineCrashRelation")
+	}
+	if !strings.Contains(text, "report.EngineCrashRelation = suspectedRelationFromFirebirdLog") {
+		t.Fatal("o bugcheck do firebird.log precisa continuar sendo registrado em EngineCrashRelation")
 	}
 }
 

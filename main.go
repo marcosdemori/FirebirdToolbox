@@ -4152,12 +4152,13 @@ func plausibleRelationName(name string) bool {
 	return true
 }
 
-// suspectedRelationFromFirebirdLog le o sinal forte da falha. Quando o motor
-// sofre bugcheck ele registra no firebird.log a tabela que estava varrendo,
-// enquanto a saida do gbak so mostra a ultima tabela que ele chegou a escrever
-// antes de morrer - que costuma ser outra. Caso real: o gbak parou logo depois
-// de EMAIL, mas o firebird.log acusava "bugcheck during scan of table 132
-// (CAIXA)", e o -skip_data automatico foi disparado contra a tabela errada.
+// suspectedRelationFromFirebirdLog devolve a tabela que o motor estava varrendo
+// quando sofreu bugcheck. E informacao de diagnostico, nao alvo de -skip_data:
+// esse bugcheck costuma vir da fase de validacao do gfix e apontar um sitio de
+// dano diferente do que bloqueia o backup. Caso real DBCOM.RED: o firebird.log
+// acusava "bugcheck during scan of table 132 (CAIXA)" enquanto o gbak travava
+// na pagina 413591 ao processar EMAIL. Pular CAIXA nao mudou nada; pular EMAIL
+// levou o backup adiante. Quem escolhe o -skip_data e suspectedRelationFromGbak.
 func suspectedRelationFromFirebirdLog(logText string) string {
 	patterns := []*regexp.Regexp{
 		regexp.MustCompile(`(?i)bugcheck during scan of table\s+\d+\s*\(([^)]+)\)`),
@@ -5410,6 +5411,7 @@ type recoveryReport struct {
 	SkipData                  string
 	SuspectedRelation         string
 	SuspectedRelationSource   string
+	EngineCrashRelation       string
 	IndexRescueAttempted      bool
 	IndexesDisabled           []string
 	RowRescueAttempted        bool
@@ -5606,7 +5608,7 @@ func writeRecoveryReport(r recoveryReport) error {
 		}
 	}
 
-	if r.BackupFailureDetails != "" || r.SuspectedRelation != "" {
+	if r.BackupFailureDetails != "" || r.SuspectedRelation != "" || r.EngineCrashRelation != "" {
 		b.WriteString("\r\nFALHA DO BACKUP / DIAGNÓSTICO DO GBAK\r\n")
 		if r.SuspectedRelation != "" {
 			line := "Possível relação afetada: " + r.SuspectedRelation
@@ -5614,6 +5616,12 @@ func writeRecoveryReport(r recoveryReport) error {
 				line += " (identificada pelo " + r.SuspectedRelationSource + ")"
 			}
 			b.WriteString(line + "\r\n")
+		}
+		if r.EngineCrashRelation != "" {
+			b.WriteString("Tabela onde o motor sofreu bugcheck: " + r.EngineCrashRelation + " (firebird.log)\r\n")
+			if r.SuspectedRelation != "" && !strings.EqualFold(r.EngineCrashRelation, r.SuspectedRelation) {
+				b.WriteString("As duas tabelas são diferentes: o -skip_data trabalha sobre a relação que bloqueia o backup, enquanto o bugcheck indica outro ponto de dano. Não trate nenhuma das duas como a única causa.\r\n")
+			}
 		}
 		if r.BackupFailureDetails != "" {
 			b.WriteString(strings.ReplaceAll(r.BackupFailureDetails, "\n", "\r\n") + "\r\n")
@@ -7415,18 +7423,21 @@ func runAdvancedRecovery(ctx context.Context, c workflowConfig) (retErr error) {
 
 	if backupErr != nil || !fileExists(backup) {
 		report.BackupFailureDetails = relevantGbakFailureLines(backupOutput, 48)
-		// O firebird.log tem prioridade: ele nomeia a tabela que o motor estava
-		// varrendo quando quebrou. A saida do gbak so indica onde ele parou.
-		report.SuspectedRelation = suspectedRelationFromFirebirdLog(collectFirebirdLogDelta(logSnapshot))
-		report.SuspectedRelationSource = "firebird.log"
-		if report.SuspectedRelation == "" {
-			report.SuspectedRelation = suspectedRelationFromGbak(backupOutput)
+		// Dois sinais, duas perguntas diferentes. O log do gbak responde "qual
+		// relação bloqueia o backup" e por isso é ele que escolhe o alvo do
+		// -skip_data. O firebird.log responde "onde o motor quebrou" e entra no
+		// relatório como diagnóstico, sem comandar nenhuma decisão.
+		report.SuspectedRelation = suspectedRelationFromGbak(backupOutput)
+		if report.SuspectedRelation != "" {
 			report.SuspectedRelationSource = "log do gbak"
+			appendLog("Possível relação afetada pelo erro do gbak: " + report.SuspectedRelation)
 		}
-		if report.SuspectedRelation == "" {
-			report.SuspectedRelationSource = ""
-		} else {
-			appendLog("Possível relação afetada: " + report.SuspectedRelation + " (identificada pelo " + report.SuspectedRelationSource + ")")
+		report.EngineCrashRelation = suspectedRelationFromFirebirdLog(collectFirebirdLogDelta(logSnapshot))
+		if report.EngineCrashRelation != "" {
+			appendLog("O motor registrou bugcheck ao varrer a tabela " + report.EngineCrashRelation + " (firebird.log).")
+			if report.SuspectedRelation != "" && !strings.EqualFold(report.EngineCrashRelation, report.SuspectedRelation) {
+				appendLog("Os dois sinais apontam tabelas diferentes: o dano não está em um único ponto.")
+			}
 		}
 		if report.BackupFailureDetails != "" && !detailedLog {
 			appendLog("Falha do backup - mensagens relevantes:")
@@ -7567,6 +7578,9 @@ func runAdvancedRecovery(ctx context.Context, c workflowConfig) (retErr error) {
 			report.FinalState += "; METADADOS PRESERVADOS"
 		}
 		if report.SuspectedRelation != "" {
+			if report.EngineCrashRelation != "" && !strings.EqualFold(report.EngineCrashRelation, report.SuspectedRelation) {
+				return fmt.Errorf("backup de recuperação falhou; possível relação afetada: %s, e o motor sofreu bugcheck ao varrer %s. Metadados e logs foram preservados para a próxima tentativa", report.SuspectedRelation, report.EngineCrashRelation)
+			}
 			return fmt.Errorf("backup de recuperação falhou; possível relação afetada: %s. Metadados e logs foram preservados para a próxima tentativa", report.SuspectedRelation)
 		}
 		return errors.New("nem gfix/gbak conseguiram produzir um backup de dados utilizável; preserve o original, a cópia, os metadados e o log técnico para recuperação de baixo nível")
